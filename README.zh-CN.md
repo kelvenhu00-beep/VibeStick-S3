@@ -16,9 +16,25 @@
 
 ![VibeStick 语音输入流程，显示 StickS3 录音状态和 Mac HUD](assets/brand/voice-input-preview.png)
 
-VibeStick 把 M5Stack StickS3 变成一个桌面 AI agent 小终端：显示状态、7D 用量、提醒音，并支持长按说话后自动转写粘贴到 Mac。
+VibeStick 把 M5Stack StickS3 变成一个桌面 AI agent 小终端：显示 Codex
+或 Claude 状态、7D 剩余用量、连接方式、当前 Wi-Fi、电池状态和提醒音。
+它使用设备自带麦克风进行按住说话，把识别结果粘贴到 Mac 当前文本框，并让用户
+在设备上明确选择执行或清空。
 
 VibeStick 面向 M5Stack StickS3，不是 M5Stack 官方项目。Codex、Claude 等第三方 agent 名称只用于说明本地兼容工具和集成。
+
+## 当前按键和屏幕
+
+- **按住正面蓝键：** 使用 StickS3 麦克风录音；松开后上传、识别并粘贴到
+  Mac 当前文本框。
+- **屏幕显示 `TEXT READY` 时：** 单击正面蓝键按 Return 执行；双击清空当前
+  文本框，不执行内容。
+- **不在 `TEXT READY` 状态时：** 单击正面蓝键清除当前提醒；双击刷新用量。
+- **单击侧面按键：** 在已启用的 Codex 和 Claude 界面之间切换。
+- **连接信息：** `USB` 表示数据线运行通道已连接，`WIFI` 表示正在使用
+  HTTP 回退，`OFF` 表示两个 Bridge 通道都不可用。第二行显示当前 Wi-Fi
+  名称；尝试已保存网络时显示 `TRY <名称>`。
+- **用量：** 当前设备界面只显示 `7D` 剩余用量，已经删除 5 小时卡片。
 
 ## 最快部署（macOS）
 
@@ -33,7 +49,8 @@ cd VibeStick
 
 然后只需完成三件事：
 
-1. 在生成的 `firmware/sticks3/include/vibe_stick_secrets.h` 中填写 2.4GHz Wi-Fi；在 `.env` 中填写语音识别 API Key。
+1. 在生成的 `firmware/sticks3/include/vibe_stick_secrets.h` 中填写一个或
+   多个 2.4GHz Wi-Fi；在 `.env` 中填写语音识别 API Key。
 2. 按下面“安装”章节首次构建并烧录 StickS3 固件。烧录需要设备进入下载模式，无法完全自动化。
 3. 烧录完成后运行 `./scripts/install.sh`，再运行 `./scripts/doctor.sh` 验证。
 
@@ -42,7 +59,9 @@ cd VibeStick
 ## 开始前的准备
 
 - [ ] M5 StickS3｜一根 USB-C 数据线｜一台电脑（最好是 Mac）
-- [ ] Wi-Fi（必须是 2.4GHz）名称和密码，用于 USB 不可用时自动回退｜语音识别模型 API Key
+- [ ] 一个或多个 Wi-Fi 名称和密码，用于自动回退和移动办公；每个网络都必须
+  提供 2.4GHz，StickS3 / ESP32-S3 不支持 5GHz Wi-Fi。
+- [ ] 语音识别模型 API Key。
 -  语音转写API key 推荐 SiliconFlow：<https://cloud.siliconflow.cn/i/7ZCoy9fU>。国内直连、有免费额度、OpenAI 兼容；演示视频用的就是 SiliconFlow。可改用其他 OpenAI 兼容服务的 `base_url` 和模型名称。
 -  如要显示 Claude 7D 用量（该功能默认关闭）。需要 Claude Code CLI（在终端运行 `claude` 后执行 `/login`），并在 `.env` 中设置 `VIBE_STICK_CLAUDE_USAGE=on`。
 
@@ -69,8 +88,11 @@ open -e firmware/sticks3/include/vibe_stick_secrets.h
 open -e .env
 ```
 
-在 `vibe_stick_secrets.h` 里填写 Wi-Fi 名称和密码。固件运行时会通过
-Bonjour 自动发现 Mac Bridge；`VIBE_STICK_BRIDGE_HOST` 只作为兼容回退地址，
+在 `vibe_stick_secrets.h` 里填写单个 Wi-Fi，或者使用生成示例中的
+`VIBE_STICK_WIFI_NETWORKS` 保存多个网络。连接失败时，固件会依次轮换这些
+网络；如果已经连上 Wi-Fi、但连续五次状态轮询仍找不到 Mac Bridge，并且设备
+没有录音或等待文本确认，也会尝试下一个已保存网络。固件运行时通过 Bonjour
+自动发现 Mac Bridge；`VIBE_STICK_BRIDGE_HOST` 只作为兼容回退地址，
 `scripts/setup.sh` 会在可能时自动填写。
 
 在 `.env` 里填写 ASR key 和需要的 provider 设置。默认推荐 SiliconFlow：
@@ -138,7 +160,10 @@ ls /dev/cu.*
 
 如果 Codex 已经能用、而 Claude 那栏显示 `--%`，这是正常的：Claude 用量默认关闭（更安全）；如需显示，请设置 `VIBE_STICK_CLAUDE_USAGE=on`，并确保 Claude Code 已通过 `claude` 和 `/login` 登录。
 
-11. 👤 打开任意文本框，长按正面蓝键说话，松开后 VibeStick 应自动转写并粘贴。
+11. 👤 打开任意文本框，按住正面蓝键说话并松开。设备依次显示
+`LISTENING`、`UPLOADING`、`TRANSCRIBING`，识别结果粘贴后显示
+`TEXT READY`。单击正面蓝键执行，或双击清空文本而不执行。单段录音到
+55 秒时会强制停止。
 
 开发调试时可以用 `./scripts/dev.sh` 替代 `./scripts/install.sh`，它会在当前终端里运行 bridge。
 
@@ -160,7 +185,11 @@ ESP-IDF 没有加载到当前 shell，或者还没有安装。先 source ESP-IDF
 
 ### StickS3 连不上 Wi-Fi
 
-请使用 2.4GHz Wi-Fi。StickS3 / ESP32-S3 不支持 5GHz Wi-Fi。
+请使用 2.4GHz Wi-Fi。StickS3 / ESP32-S3 不支持 5GHz Wi-Fi。需要移动办公
+时，在 `firmware/sticks3/include/vibe_stick_secrets.h` 中定义
+`VIBE_STICK_WIFI_NETWORKS`。设备会显示已经连接的 SSID，或在轮换已保存网络
+时显示 `TRY <名称>`。使用 Wi-Fi 回退时，Mac 和 StickS3 必须处于同一网络；
+启用了客户端隔离的网络无法连接 Bridge。
 
 ### 录音能转写但没有粘贴
 
@@ -200,7 +229,9 @@ open -e .env
 - `VIBE_STICK_BRIDGE_TOKEN`：bridge 绑定到非 loopback 地址时必需的共享 token，例如 `0.0.0.0`。
 - `VIBE_STICK_MAX_RECORDING_AUDIO_BYTES`：`/recording/audio` 最大请求体大小，默认 `2000000`。
 - `VIBE_STICK_RECORDING_USE_MAC_MIC`：设为 `0` 可关闭 Mac 麦克风兜底。
-- `VIBE_STICK_AUTO_ENTER`：设为 `1` 会在粘贴后自动按 Return。
+- `VIBE_STICK_AUTO_ENTER`：旧版自动提交选项。请保留默认值 `0`，以使用
+  `TEXT READY`、单击执行和双击清空流程。设为 `1` 会在粘贴后立即按 Return，
+  绕过设备上的确认步骤。
 
 ### ASR 方案 1：SiliconFlow（默认推荐）
 
@@ -293,7 +324,10 @@ idf.py build
 - 固件只面向 M5Stack StickS3。
 - Codex quota 来自本地 Codex session JSONL 里的 `rate_limits`，不是官方 quota API。
 - Claude usage 来自未公开的 Claude Code OAuth endpoint，默认关闭。
-- ASR 可靠性取决于麦克风采集、上传 PCM 质量、provider 可达性和模型配置。
+- 设备单段录音上限为 55 秒。
+- USB 直接发送采集到的 16kHz / 16-bit / 单声道 PCM；Wi-Fi 使用 IMA ADPCM
+  压缩同一批采样，Bridge 解码回 PCM 后再写入 WAV 并进行 ASR。
+- ASR 可靠性取决于麦克风采集、网络质量、provider 可达性和模型配置。
 
 ## 贡献与安全
 

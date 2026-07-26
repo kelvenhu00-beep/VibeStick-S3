@@ -73,13 +73,28 @@ X-Vibe-Stick-Channels: 1
 X-Vibe-Stick-Bits-Per-Sample: 16
 ```
 
+Wi-Fi uploads normally add:
+
+```text
+X-Vibe-Stick-Audio-Encoding: ima-adpcm
+X-Vibe-Stick-PCM-Samples: <decoded-sample-count>
+```
+
+The bridge decodes that body back to the declared 16-bit PCM samples. USB audio
+frames remain raw PCM and do not use these HTTP encoding headers.
+
 When `VIBE_STICK_BRIDGE_TOKEN` is configured on the bridge and firmware, protected POST requests also include:
 
 ```text
 X-Vibe-Stick-Token: <shared-token>
 ```
 
-Protected endpoints are `/event`, `/quota/refresh`, `/recording/start`, `/recording/audio`, and `/recording/stop`. If the bridge binds outside loopback, such as `0.0.0.0`, `VIBE_STICK_BRIDGE_TOKEN` is required and placeholder tokens are rejected. If the bridge binds to loopback only, missing tokens are allowed for local development.
+Protected endpoints are `/event`, `/quota/refresh`, `/recording/start`,
+`/recording/audio`, `/recording/stop`, `/recording/confirm`, and
+`/recording/cancel`. If the bridge binds outside loopback, such as `0.0.0.0`,
+`VIBE_STICK_BRIDGE_TOKEN` is required and placeholder tokens are rejected. If
+the bridge binds to loopback only, missing tokens are allowed for local
+development.
 
 ## GET /state
 
@@ -123,7 +138,12 @@ Returns the current bridge state:
 
 `battery` is intentionally `null` from the bridge. The StickS3 displays its local PMIC battery reading.
 
-`active_provider` selects which normalized `provider` block the firmware should render. `provider.quota_5h_remaining` and `provider.quota_7d_remaining` are remaining percentages from `0` to `100`; `null` means unknown and the firmware renders `--%`. The legacy `codex` block remains present for backward compatibility.
+`active_provider` selects which normalized `provider` block the firmware should
+render. The state schema retains both quota fields for bridge compatibility, but
+the current StickS3 screen renders only `provider.quota_7d_remaining`.
+Percentages range from `0` to `100`; `null` means unknown and the firmware
+renders `--%`. The legacy `codex` block remains present for backward
+compatibility.
 
 ## GET /health
 
@@ -183,12 +203,18 @@ Starts a recording session:
 
 ## POST /recording/audio
 
-Uploads raw little-endian signed PCM for the active session:
+Uploads audio for the active session:
 
 ```text
 POST /recording/audio?session_id=<id>
 Content-Type: application/octet-stream
 ```
+
+USB sends raw little-endian signed PCM through the framed transport. HTTP
+accepts the same raw PCM form for compatibility, while current firmware normally
+sends IMA ADPCM with the two encoding headers documented above. The bridge
+validates the encoded length and decoded sample count before attaching PCM to
+the recording session.
 
 The bridge writes a local WAV file under:
 
@@ -214,3 +240,7 @@ When transcription succeeds, the bridge pastes the text into the focused macOS a
 On StickS3, single-click the front button to submit or double-click it to clear the focused text field without submitting. Recording status does not trigger agent alert sounds.
 
 StickS3 appends `?compact=1` to the stop, confirm, and cancel endpoints. Compact responses omit the transcript and audio path so long recognized text cannot overflow the firmware response buffer.
+
+The firmware forcibly ends a single recording after 55 seconds. The bridge also
+expires an abandoned active recording after 180 seconds when no stop request
+arrives.

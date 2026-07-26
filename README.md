@@ -19,9 +19,30 @@
 
 ![VibeStick voice input flow showing StickS3 recording states and Mac HUD](assets/brand/voice-input-preview.png)
 
-VibeStick turns an M5Stack StickS3 into a tiny desktop companion for coding agents: status, 7D usage, alerts, and push-to-talk transcription into your Mac.
+VibeStick turns an M5Stack StickS3 into a tiny desktop companion for coding
+agents. It shows Codex or Claude status, remaining 7D usage, connection mode,
+the current Wi-Fi name, battery state, and audible alerts. Its built-in
+microphone provides push-to-talk transcription into the focused Mac text box,
+followed by an explicit run-or-clear decision on the device.
 
 VibeStick targets M5Stack StickS3 hardware and is not an official M5Stack project. Third-party agent names such as Codex and Claude describe compatible local tools and integrations only.
+
+## Current controls and screen
+
+- **Front button, hold:** record from the StickS3 microphone. Release to upload,
+  transcribe, and paste into the focused Mac text box.
+- **When `TEXT READY` is shown:** single-click runs the pasted text by pressing
+  Return; double-click clears the focused text box without submitting.
+- **Front button outside `TEXT READY`:** single-click dismisses the current
+  alert; double-click requests a fresh usage reading.
+- **Side button, single-click:** switch between the enabled Codex and Claude
+  provider views.
+- **Connection lines:** `USB` means the runtime data cable is active, `WIFI`
+  means HTTP fallback is active, and `OFF` means neither bridge path is
+  available. The second line shows the connected Wi-Fi name or `TRY <name>`
+  while a saved profile is being attempted.
+- **Usage:** the device UI intentionally shows only remaining `7D` usage. The
+  removed 5-hour card is not part of the current screen.
 
 ## Fastest deployment (macOS)
 
@@ -36,7 +57,8 @@ cd VibeStick
 
 Then complete three tasks:
 
-1. Fill the generated `firmware/sticks3/include/vibe_stick_secrets.h` with a 2.4 GHz Wi-Fi network, and put the transcription API key in `.env`.
+1. Fill the generated `firmware/sticks3/include/vibe_stick_secrets.h` with one
+   or more 2.4 GHz Wi-Fi networks, and put the transcription API key in `.env`.
 2. Follow the Install section below to build and flash the StickS3 firmware once. Flashing requires physically putting the device in download mode, so it cannot be fully automated.
 3. After flashing, run `./scripts/install.sh`, then verify everything with `./scripts/doctor.sh`.
 
@@ -46,7 +68,9 @@ Real Wi-Fi credentials, API keys, and the generated shared token are excluded by
 
 - [ ] M5Stack StickS3 and a USB-C data cable.
 - [ ] A Mac. The USB-C data cable is the preferred runtime connection.
-- [ ] Wi-Fi name and password for automatic fallback. The Wi-Fi must be 2.4 GHz; StickS3 / ESP32-S3 does not support 5 GHz Wi-Fi.
+- [ ] One or more Wi-Fi names and passwords for automatic fallback and
+  roaming. Every network must provide 2.4 GHz; StickS3 / ESP32-S3 does not
+  support 5 GHz Wi-Fi.
 - [ ] To show Claude 7D usage: this feature is off by default (safer). It needs the Claude Code CLI (run `claude` then `/login` in Terminal) and `VIBE_STICK_CLAUDE_USAGE=on` in `.env`.
 - [ ] An ASR API key for speech transcription. Recommended: SiliconFlow at <https://cloud.siliconflow.cn/i/7ZCoy9fU>. It works directly in China, has free quota, and is OpenAI-compatible. The demo video uses SiliconFlow. You can also use another OpenAI-compatible ASR provider's `base_url` and model name instead.
 
@@ -74,9 +98,14 @@ open -e firmware/sticks3/include/vibe_stick_secrets.h
 open -e .env
 ```
 
-In `vibe_stick_secrets.h`, set the Wi-Fi credentials. The firmware discovers the
-Mac bridge through Bonjour at runtime. `VIBE_STICK_BRIDGE_HOST` is retained only
-as a compatibility fallback, and `scripts/setup.sh` fills it when possible.
+In `vibe_stick_secrets.h`, set either the single Wi-Fi credentials or
+`VIBE_STICK_WIFI_NETWORKS` from the generated example. With multiple saved
+profiles, the firmware rotates through them when association fails. If Wi-Fi is
+connected but the Mac bridge remains unreachable for five state polls, it also
+tries the next saved profile when the device is not recording or waiting for a
+text decision. The firmware discovers the Mac bridge through Bonjour at
+runtime. `VIBE_STICK_BRIDGE_HOST` is retained only as a compatibility fallback,
+and `scripts/setup.sh` fills it when possible.
 
 In `.env`, set the ASR key and any provider choices. The default ASR example is SiliconFlow:
 
@@ -144,7 +173,11 @@ Aim for all required checks to pass. Then glance at the StickS3: Codex / Claude 
 
 If Codex works but the Claude column shows `--%`, that is expected: Claude usage is disabled by default (safer), so to display it set `VIBE_STICK_CLAUDE_USAGE=on` and make sure Claude Code is logged in via `claude` and `/login`.
 
-11. 👤 Open any text box, long-press the front blue button, speak, and release. VibeStick should transcribe and paste the text automatically.
+11. 👤 Open any text box, hold the front blue button, speak, and release. The
+device proceeds through `LISTENING`, `UPLOADING`, and `TRANSCRIBING`, then pastes
+the result and shows `TEXT READY`. Single-click the front button to run it, or
+double-click to clear the text without running it. One recording is forcibly
+stopped after 55 seconds.
 
 For development without installing LaunchAgents, run `./scripts/dev.sh` from the repository root instead of `./scripts/install.sh`.
 
@@ -167,6 +200,11 @@ Unplug and replug the USB-C data cable. Put the StickS3 into download mode again
 ### StickS3 cannot join Wi-Fi
 
 Use a 2.4 GHz Wi-Fi network. StickS3 / ESP32-S3 does not support 5 GHz Wi-Fi.
+For mobility, define `VIBE_STICK_WIFI_NETWORKS` in
+`firmware/sticks3/include/vibe_stick_secrets.h`. The screen shows the connected
+SSID or `TRY <name>` while rotating through saved profiles. The Mac and StickS3
+must be on the same network for Wi-Fi fallback, and networks with client
+isolation cannot carry the bridge connection.
 
 ### Recording transcribes but does not paste
 
@@ -206,7 +244,10 @@ Empty values in `.env` generally mean "use the built-in default". `scripts/dev.s
 - `VIBE_STICK_BRIDGE_TOKEN`: shared token required whenever the bridge binds outside loopback, such as `0.0.0.0`.
 - `VIBE_STICK_MAX_RECORDING_AUDIO_BYTES`: max `/recording/audio` body size, default `2000000`.
 - `VIBE_STICK_RECORDING_USE_MAC_MIC`: set to `0` to disable Mac microphone fallback.
-- `VIBE_STICK_AUTO_ENTER`: set to `1` to press Return after pasting.
+- `VIBE_STICK_AUTO_ENTER`: legacy automatic-submit option. Keep the default `0`
+  to use `TEXT READY`, single-click Run, and double-click Clear. Setting it to
+  `1` presses Return immediately after paste and bypasses the intended device
+  confirmation workflow.
 
 ### ASR option 1: SiliconFlow (recommended default)
 
@@ -299,7 +340,12 @@ idf.py build
 - The firmware targets M5Stack StickS3 only.
 - Codex quota is inferred from local Codex session JSONL events with `rate_limits`; it is not an official quota API.
 - Claude usage comes from an undocumented Claude Code OAuth endpoint and is disabled by default.
-- ASR reliability depends on microphone capture, uploaded PCM quality, provider availability, and configured model.
+- A single device recording is limited to 55 seconds.
+- USB sends the captured 16 kHz / 16-bit / mono PCM directly. Wi-Fi compresses
+  the same samples with IMA ADPCM for transport, and the bridge reconstructs PCM
+  before writing the WAV file and running ASR.
+- ASR reliability depends on microphone capture, network quality, provider
+  availability, and the configured model.
 
 ## Contributing & Security
 
