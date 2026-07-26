@@ -32,14 +32,18 @@ release.
 - Added Bonjour bridge discovery so changing DHCP addresses does not require a
   firmware configuration change.
 - Added multiple-known-Wi-Fi support in the firmware secrets example.
-- Added the on-device `USB`, `WIFI`, and `OFF` connection indicator.
+- Added automatic saved-network rotation when association or repeated Mac
+  bridge discovery fails.
+- Added the on-device `USB`, `WIFI`, and `OFF` connection indicator plus the
+  connected or attempted Wi-Fi name.
 
 ### Voice input and button workflow
 
-- Changed the StickS3 microphone path to upload captured PCM audio to the Mac
-  bridge for transcription.
+- Changed the StickS3 microphone path to upload captured audio to the Mac bridge
+  for transcription: raw PCM over USB and IMA ADPCM over Wi-Fi.
 - Added upload size limits, compact responses, retry/timeout handling, stale
   recording expiry, and recording diagnostics.
+- Added a 55-second firmware recording limit and a missed-release recovery path.
 - Retained an optional Mac microphone fallback.
 - Added a confirmation stage after recognized text is pasted:
   single-click submits the text and double-click clears it.

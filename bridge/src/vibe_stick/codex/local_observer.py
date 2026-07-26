@@ -130,6 +130,9 @@ def _quota_from_payload(
     rate_limits = payload.get("rate_limits")
     if not isinstance(rate_limits, dict):
         return None
+    limit_id = rate_limits.get("limit_id")
+    if limit_id not in (None, "", "codex"):
+        return None
 
     five_hour = None
     seven_day = None

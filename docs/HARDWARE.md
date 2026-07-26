@@ -9,7 +9,8 @@ The project does not currently claim support for other devices because the UI la
 ## Hardware Used
 
 - Screen: LVGL UI on the StickS3 display.
-- Blue front button: push-to-talk recording.
+- Blue front button: hold for push-to-talk recording; after `TEXT READY`,
+  single-click submits and double-click clears the focused text box.
 - Side button: provider switching.
 - Microphone: StickS3 microphone captured as 16 kHz / 16-bit / mono PCM.
 - Speaker: ES8311 / I2S playback for generated agent status tones.
@@ -63,7 +64,10 @@ To save several known networks, add this optional definition:
 
 When the list is present it replaces the single `VIBE_STICK_WIFI_SSID` and
 `VIBE_STICK_WIFI_PASSWORD` pair. The firmware rotates through the saved profiles
-until one connects.
+when association fails. It also changes profiles after five consecutive bridge
+state failures on an associated Wi-Fi network, except during recording or while
+waiting for the user to submit or clear recognized text. The screen displays
+the connected SSID or `TRY <name>` while attempting a profile.
 
 The Wi-Fi network must be 2.4 GHz. If the SSID is a combined 2.4/5 GHz network and the StickS3 cannot connect, create or select a dedicated 2.4 GHz SSID.
 
@@ -102,3 +106,7 @@ After the cable or USB bridge is unavailable, the StickS3 falls back to HTTP.
 The Mac bridge listens on `0.0.0.0:8765`; Bonjour/mDNS multicast must be allowed
 between clients on the same Wi-Fi network. Networks with client isolation cannot
 carry the fallback path.
+
+USB transports captured microphone PCM directly. Wi-Fi transport applies IMA
+ADPCM compression on the StickS3 and the bridge decodes it before producing the
+WAV file. A single device recording is forcibly stopped after 55 seconds.

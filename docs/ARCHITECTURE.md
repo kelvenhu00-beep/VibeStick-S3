@@ -29,11 +29,14 @@ It owns:
 
 - Screen rendering with LVGL.
 - USB runtime connection and Wi-Fi fallback.
+- Automatic rotation through multiple saved 2.4 GHz Wi-Fi profiles.
 - Polling `GET /state`.
 - Posting button events to `/event` and `/quota/refresh`.
 - Blue front-button push-to-talk recording.
 - 16 kHz / 16-bit / mono PCM recording from the StickS3 microphone.
-- Uploading PCM to `/recording/audio`.
+- Uploading PCM over USB or IMA ADPCM over Wi-Fi to `/recording/audio`.
+- Explicit single-click submit and double-click clear after recognized text is
+  pasted.
 - Agent status sounds generated as PCM and played through ES8311/I2S speaker output.
 - Local battery and USB power display from the StickS3 PMIC.
 
@@ -73,7 +76,11 @@ replaces the configured bridge address. The configured address remains only as
 a compatibility fallback when Bonjour is unavailable.
 
 After a failed HTTP connection or a new Wi-Fi address, the firmware repeats
-service discovery instead of continuing to use a stale Mac address.
+service discovery instead of continuing to use a stale Mac address. When
+multiple Wi-Fi profiles are configured, association failures rotate immediately
+to the next profile. Five consecutive state-poll failures while Wi-Fi is
+associated also trigger profile rotation, except while recording or awaiting a
+text decision.
 
 BLE is not part of the current mainline transport.
 
@@ -91,9 +98,14 @@ BLE is not part of the current mainline transport.
 2. Firmware starts StickS3 microphone recording and posts `/recording/start`.
 3. Firmware shows a full-screen listening overlay.
 4. User releases the button.
-5. Firmware stops recording, uploads PCM to `/recording/audio`, then posts `/recording/stop`.
-6. Bridge writes a local WAV file, runs ASR, and pastes the transcript when successful.
-7. Recording start and stop do not play agent alert sounds.
+5. Firmware stops recording. It uploads raw PCM over USB; for Wi-Fi it first
+   compresses the PCM samples with IMA ADPCM.
+6. Bridge reconstructs PCM when needed, writes a local WAV file, runs ASR, and
+   pastes the transcript when successful.
+7. The device shows `TEXT READY`. A front-button single-click presses Return to
+   submit; a double-click clears the focused text field without submitting.
+8. The firmware forcibly stops a recording after 55 seconds. Recording states
+   do not play agent alert sounds.
 
 ## Status And Quota
 
@@ -101,7 +113,7 @@ Codex status is inferred from local Codex process/session activity and recent se
 
 The StickS3 provider surface is limited to the providers explicitly compiled into the firmware.
 
-## v0.1.1 Limits
+## Current limits
 
 - No packaged Mac App.
 - No signed firmware release artifact.
