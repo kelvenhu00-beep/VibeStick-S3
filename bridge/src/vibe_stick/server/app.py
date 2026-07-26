@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from vibe_stick import __version__ as BRIDGE_VERSION
 from vibe_stick.audio.recorder import RecordingController
+from vibe_stick.audio.adpcm import decode_ima_adpcm
 from vibe_stick.claude.usage import fetch_usage as fetch_claude_usage
 from vibe_stick.claude.usage import to_quota_snapshot as claude_usage_to_quota
 from vibe_stick.codex.quota import QuotaSnapshot, load_quota, save_quota
@@ -341,8 +342,23 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
                     )
                     return
                 read_started_at = time.monotonic()
-                pcm = self._read_raw_body(content_length)
+                wire_audio = self._read_raw_body(content_length)
                 read_ms = round((time.monotonic() - read_started_at) * 1000)
+                encoding = (self.headers.get("X-Vibe-Stick-Audio-Encoding") or "").strip().lower()
+                if encoding == "ima-adpcm":
+                    try:
+                        pcm = decode_ima_adpcm(
+                            wire_audio,
+                            _int_header(self.headers.get("X-Vibe-Stick-PCM-Samples"), 0),
+                        )
+                    except ValueError as exc:
+                        self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                        return
+                elif encoding:
+                    self._send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported audio encoding")
+                    return
+                else:
+                    pcm = wire_audio
                 attach_started_at = time.monotonic()
                 response = store.upload_recording_audio(
                     pcm,
@@ -355,7 +371,8 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
                 print(
                     "recording upload timing "
                     f"session={session_id} "
-                    f"bytes={len(pcm)} "
+                    f"wire_bytes={len(wire_audio)} "
+                    f"pcm_bytes={len(pcm)} "
                     f"read_ms={read_ms} "
                     f"attach_ms={attach_ms}",
                     flush=True,

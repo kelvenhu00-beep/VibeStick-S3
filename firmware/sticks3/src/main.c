@@ -52,6 +52,7 @@
 #define RECORDING_STOP_TIMEOUT_MS 60000
 #define RECORDING_RELEASE_DEBOUNCE_MS 80
 #define RECORDING_HARD_LIMIT_MS 55000
+#define BRIDGE_FAILURES_BEFORE_WIFI_ROTATE 5
 
 #define PIN_BUTTON_FRONT 11
 #define PIN_BUTTON_SIDE 12
@@ -150,6 +151,7 @@ static size_t s_wifi_network_index;
 static char s_bridge_host[64] = VIBE_STICK_BRIDGE_HOST;
 static uint16_t s_bridge_port = VIBE_STICK_BRIDGE_PORT;
 static bool s_bridge_discovery_required = VIBE_STICK_BRIDGE_DISCOVERY;
+static unsigned s_bridge_failure_count;
 static bool s_recording_overlay_visible;
 static volatile bool s_long_press_active;
 static int64_t s_recording_started_ms;
@@ -161,6 +163,7 @@ static char s_recording_session_id[40];
 
 static lv_display_t *s_display;
 static lv_obj_t *s_wifi_label;
+static lv_obj_t *s_wifi_name_label;
 static lv_obj_t *s_battery_label;
 static lv_obj_t *s_battery_icon;
 static lv_obj_t *s_battery_fill;
@@ -174,6 +177,82 @@ static lv_obj_t *s_quota_7d_title_label;
 static lv_obj_t *s_quota_7d_bar;
 static lv_obj_t *s_quota_7d_label;
 static lv_obj_t *s_quota_status_label;
+
+static const int s_ima_index_table[16] = {
+    -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8,
+};
+
+static const int s_ima_step_table[89] = {
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31,
+    34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+    143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411,
+    1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026,
+    4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+    11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623,
+    27086, 29794, 32767,
+};
+
+static uint8_t *ima_adpcm_encode(const int16_t *samples, size_t sample_count, size_t *encoded_len)
+{
+    if (!samples || sample_count == 0 || !encoded_len) {
+        return NULL;
+    }
+    size_t code_count = sample_count - 1;
+    size_t output_len = 4 + (code_count + 1) / 2;
+    uint8_t *output = heap_caps_calloc(1, output_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!output) {
+        output = calloc(1, output_len);
+    }
+    if (!output) {
+        return NULL;
+    }
+
+    int predictor = samples[0];
+    int index = 0;
+    output[0] = (uint8_t)(predictor & 0xff);
+    output[1] = (uint8_t)((predictor >> 8) & 0xff);
+    output[2] = (uint8_t)index;
+
+    for (size_t i = 1; i < sample_count; ++i) {
+        int step = s_ima_step_table[index];
+        int difference = (int)samples[i] - predictor;
+        int code = 0;
+        if (difference < 0) {
+            code = 8;
+            difference = -difference;
+        }
+        int delta = step >> 3;
+        if (difference >= step) {
+            code |= 4;
+            difference -= step;
+            delta += step;
+        }
+        if (difference >= (step >> 1)) {
+            code |= 2;
+            difference -= step >> 1;
+            delta += step >> 1;
+        }
+        if (difference >= (step >> 2)) {
+            code |= 1;
+            delta += step >> 2;
+        }
+        predictor += (code & 8) ? -delta : delta;
+        if (predictor > INT16_MAX) predictor = INT16_MAX;
+        if (predictor < INT16_MIN) predictor = INT16_MIN;
+        index += s_ima_index_table[code];
+        if (index < 0) index = 0;
+        if (index > 88) index = 88;
+        size_t code_index = i - 1;
+        if ((code_index & 1) == 0) {
+            output[4 + code_index / 2] = (uint8_t)(code & 0x0f);
+        } else {
+            output[4 + code_index / 2] |= (uint8_t)((code & 0x0f) << 4);
+        }
+    }
+    *encoded_len = output_len;
+    return output;
+}
 static lv_obj_t *s_recording_overlay;
 static lv_obj_t *s_recording_wave_group;
 static lv_obj_t *s_recording_wave_bars[5];
@@ -258,13 +337,13 @@ static const lv_point_precise_t s_battery_bolt_points[] = {
 
 static void render_state(void);
 
-static void queue_event(agent_event_type_t type)
+static bool queue_event(agent_event_type_t type)
 {
     if (!s_event_queue) {
-        return;
+        return false;
     }
     agent_event_t event = {.type = type};
-    (void)xQueueSend(s_event_queue, &event, 0);
+    return xQueueSend(s_event_queue, &event, 0) == pdTRUE;
 }
 
 static const agent_provider_config_t *provider_config(agent_provider_t provider)
@@ -659,6 +738,9 @@ static void create_ui(void)
 
     s_wifi_label = make_label(screen, "WIFI", &lv_font_montserrat_10, lv_color_hex(0xf3f4f6), 38, LV_TEXT_ALIGN_LEFT);
     lv_obj_align(s_wifi_label, LV_ALIGN_TOP_LEFT, 9, 9);
+    s_wifi_name_label = make_label(screen, "", &lv_font_montserrat_10,
+                                   lv_color_hex(0x9aa0aa), 117, LV_TEXT_ALIGN_LEFT);
+    lv_obj_align(s_wifi_name_label, LV_ALIGN_TOP_LEFT, 9, 25);
 
     s_battery_label = make_label(screen, "--%", &lv_font_montserrat_10, lv_color_hex(0xf3f4f6), 28, LV_TEXT_ALIGN_RIGHT);
     lv_obj_align(s_battery_label, LV_ALIGN_TOP_RIGHT, -35, 9);
@@ -801,6 +883,20 @@ static void render_state(void)
     lv_label_set_text(s_wifi_label, usb_runtime ? "USB" : (s_wifi_connected ? "WIFI" : "OFF"));
     lv_obj_set_style_text_color(s_wifi_label,
                                 bridge_transport_available ? lv_color_hex(0xf3f4f6) : lv_color_hex(0x686e78),
+                                0);
+    size_t network_count = sizeof(s_wifi_networks) / sizeof(s_wifi_networks[0]);
+    const char *network_name = network_count > 0
+        ? s_wifi_networks[s_wifi_network_index % network_count].ssid
+        : "";
+    char network_text[48] = {0};
+    if (s_wifi_connected) {
+        strlcpy(network_text, network_name, sizeof(network_text));
+    } else if (network_name[0] != '\0') {
+        snprintf(network_text, sizeof(network_text), "TRY %s", network_name);
+    }
+    lv_label_set_text(s_wifi_name_label, network_text);
+    lv_obj_set_style_text_color(s_wifi_name_label,
+                                s_wifi_connected ? lv_color_hex(0x9aa0aa) : lv_color_hex(0x686e78),
                                 0);
     set_battery_ui(s_state.battery, s_state.battery_charging, s_state.usb_powered);
     if (provider->icon) {
@@ -1076,6 +1172,7 @@ static esp_err_t http_request_timeout(const char *method, const char *path, cons
 }
 
 static esp_err_t http_post_binary(const char *path, const uint8_t *body, size_t body_len,
+                                  const char *encoding, size_t pcm_samples,
                                   char *response, int response_len)
 {
     ensure_bridge_endpoint();
@@ -1110,6 +1207,12 @@ static esp_err_t http_post_binary(const char *path, const uint8_t *body, size_t 
     esp_http_client_set_header(client, "X-Vibe-Stick-Sample-Rate", "16000");
     esp_http_client_set_header(client, "X-Vibe-Stick-Channels", "1");
     esp_http_client_set_header(client, "X-Vibe-Stick-Bits-Per-Sample", "16");
+    if (encoding && encoding[0] != '\0') {
+        char sample_count[24];
+        snprintf(sample_count, sizeof(sample_count), "%u", (unsigned)pcm_samples);
+        esp_http_client_set_header(client, "X-Vibe-Stick-Audio-Encoding", encoding);
+        esp_http_client_set_header(client, "X-Vibe-Stick-PCM-Samples", sample_count);
+    }
     esp_http_client_set_post_field(client, (const char *)body, body_len);
 
     wifi_ps_type_t previous_ps = WIFI_PS_MIN_MODEM;
@@ -1198,7 +1301,19 @@ static esp_err_t bridge_post_audio(const uint8_t *body, size_t body_len,
     char path[96];
     snprintf(path, sizeof(path), "%s?session_id=%s",
              VIBE_STICK_RECORDING_AUDIO_PATH, s_recording_session_id);
-    return http_post_binary(path, body, body_len, response, response_len);
+    size_t sample_count = body_len / sizeof(int16_t);
+    size_t encoded_len = 0;
+    uint8_t *encoded = ima_adpcm_encode((const int16_t *)body, sample_count, &encoded_len);
+    if (!encoded) {
+        ESP_LOGW(TAG, "IMA ADPCM allocation failed; uploading PCM");
+        return http_post_binary(path, body, body_len, NULL, 0, response, response_len);
+    }
+    ESP_LOGI(TAG, "audio compressed pcm_bytes=%u adpcm_bytes=%u",
+             (unsigned)body_len, (unsigned)encoded_len);
+    esp_err_t err = http_post_binary(path, encoded, encoded_len, "ima-adpcm",
+                                     sample_count, response, response_len);
+    free(encoded);
+    return err;
 }
 
 static void copy_json_string(cJSON *root, const char *key, char *target, size_t target_len)
@@ -1380,12 +1495,33 @@ static void poll_state(void)
     }
     esp_err_t err = bridge_request("GET", VIBE_STICK_STATE_PATH, NULL, response, sizeof(response));
     if (err != ESP_OK || response[0] == '\0' || !parse_state_json(response)) {
+        size_t network_count = sizeof(s_wifi_networks) / sizeof(s_wifi_networks[0]);
+        if (!vibe_usb_ready() &&
+            s_wifi_connected &&
+            network_count > 1 &&
+            !s_long_press_active &&
+            !vibe_audio_is_recording() &&
+            !s_recording_confirmation_pending) {
+            s_bridge_failure_count++;
+            if (s_bridge_failure_count >= BRIDGE_FAILURES_BEFORE_WIFI_ROTATE) {
+                s_bridge_failure_count = 0;
+                s_bridge_discovery_required = VIBE_STICK_BRIDGE_DISCOVERY;
+                ESP_LOGW(TAG, "bridge unreachable; rotating from Wi-Fi profile %u of %u",
+                         (unsigned)(s_wifi_network_index + 1), (unsigned)network_count);
+                esp_err_t disconnect_err = esp_wifi_disconnect();
+                if (disconnect_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Wi-Fi profile rotation failed: %s",
+                             esp_err_to_name(disconnect_err));
+                }
+            }
+        }
         provider_display_state_t *display_state = current_provider_display_state();
         strlcpy(display_state->status, "OFFLINE", sizeof(display_state->status));
         s_state.wifi = s_wifi_connected;
         render_state();
         return;
     }
+    s_bridge_failure_count = 0;
     render_state();
     maybe_handle_alert();
 }
@@ -1712,8 +1848,11 @@ static void button_up_cb(void *button_handle, void *usr_data)
     (void)button_handle;
     (void)usr_data;
     if (s_long_press_active) {
-        s_long_press_active = false;
-        queue_event(VIBE_STICK_EVENT_LONG_STOP);
+        if (queue_event(VIBE_STICK_EVENT_LONG_STOP)) {
+            s_long_press_active = false;
+        } else {
+            ESP_LOGW(TAG, "button release queue full; GPIO recovery will stop recording");
+        }
     }
 }
 
