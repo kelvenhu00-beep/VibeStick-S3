@@ -1,0 +1,9 @@
+[project]
+name = "vibestick"
+version = "0.1.4"
+description = "Local VibeStick Bridge service for VibeStick."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+vibestick-bridge = "vibe_stick.__main__:main"

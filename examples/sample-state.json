@@ -1,0 +1,19 @@
+{
+  "time": "09:41",
+  "wifi": true,
+  "ble": false,
+  "battery": null,
+  "codex": {
+    "status": "RUNNING",
+    "project": "ai-signal",
+    "quota_5h_remaining": 62,
+    "quota_7d_remaining": 84,
+    "quota_updated_at": "09:38",
+    "quota_stale": false
+  },
+  "alert": {
+    "event_id": "evt_20260625_094122",
+    "type": "NONE",
+    "message": ""
+  }
+}
