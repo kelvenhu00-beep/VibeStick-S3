@@ -2,11 +2,21 @@
 
 [English README](README.md)
 
+> **源码来源与致谢**
+>
+> 本仓库是 [GaryGaryyy/VibeStick](https://github.com/GaryGaryyy/VibeStick)
+> 的修改发行版，原项目及原始代码版权归 Gary Zhang，按 MIT License 使用和再发布。
+> 当前版本以原项目提交
+> [`d7dc036`](https://github.com/GaryGaryyy/VibeStick/commit/d7dc0364423bf738a0ce5c697544b386678a1e62)
+> 为上游基准，并由 `kelvenhu00-beep` 继续修改和维护。感谢 Gary Zhang 创建并开源
+> VibeStick。本仓库不是原项目的官方版本；原始代码与本仓库修改的详细边界见
+> [相对上游的修改说明](docs/CHANGES_FROM_UPSTREAM.md)。
+
 ![VibeStick 首页，显示 Codex 和 Claude 状态](assets/brand/home-screen-preview.png)
 
 ![VibeStick 语音输入流程，显示 StickS3 录音状态和 Mac HUD](assets/brand/voice-input-preview.png)
 
-VibeStick 把 M5Stack StickS3 变成一个桌面 AI agent 小终端：显示状态、5H/7D 用量、提醒音，并支持长按说话后自动转写粘贴到 Mac。
+VibeStick 把 M5Stack StickS3 变成一个桌面 AI agent 小终端：显示状态、7D 用量、提醒音，并支持长按说话后自动转写粘贴到 Mac。
 
 VibeStick 面向 M5Stack StickS3，不是 M5Stack 官方项目。Codex、Claude 等第三方 agent 名称只用于说明本地兼容工具和集成。
 
@@ -34,7 +44,7 @@ cd VibeStick
 - [ ] M5 StickS3｜一根 USB-C 数据线｜一台电脑（最好是 Mac）
 - [ ] Wi-Fi（必须是 2.4GHz）名称和密码，用于 USB 不可用时自动回退｜语音识别模型 API Key
 -  语音转写API key 推荐 SiliconFlow：<https://cloud.siliconflow.cn/i/7ZCoy9fU>。国内直连、有免费额度、OpenAI 兼容；演示视频用的就是 SiliconFlow。可改用其他 OpenAI 兼容服务的 `base_url` 和模型名称。
--  如要显示 Claude 5H/7D 用量（该功能默认关闭）。需要 Claude Code CLI（在终端运行 `claude` 后执行 `/login`），并在 `.env` 中设置 `VIBE_STICK_CLAUDE_USAGE=on`。
+-  如要显示 Claude 7D 用量（该功能默认关闭）。需要 Claude Code CLI（在终端运行 `claude` 后执行 `/login`），并在 `.env` 中设置 `VIBE_STICK_CLAUDE_USAGE=on`。
 
 
 ## 安装
@@ -124,7 +134,7 @@ ls /dev/cu.*
 ./scripts/doctor.sh
 ```
 
-尽量让必须项全部 PASS。然后看一眼 StickS3：如果本机 provider 数据可用，Codex / Claude 状态和 5H / 7D 应该出现真实值。
+尽量让必须项全部 PASS。然后看一眼 StickS3：如果本机 provider 数据可用，Codex / Claude 状态和 7D 用量应该出现真实值。
 
 如果 Codex 已经能用、而 Claude 那栏显示 `--%`，这是正常的：Claude 用量默认关闭（更安全）；如需显示，请设置 `VIBE_STICK_CLAUDE_USAGE=on`，并确保 Claude Code 已通过 `claude` 和 `/login` 登录。
 
@@ -237,7 +247,7 @@ VIBE_STICK_TRANSCRIBE_TIMEOUT_SECONDS=120
 
 ### Claude 用量
 
-想显示 Claude 5H/7D 用量，请使用 `VIBE_STICK_PROVIDER=claude` 或 `VIBE_STICK_PROVIDER=auto`，设置 `VIBE_STICK_CLAUDE_USAGE=on`，并确保 Claude Code CLI 已在终端通过 `claude` 和 `/login` 登录。
+想显示 Claude 7D 用量，请使用 `VIBE_STICK_PROVIDER=claude` 或 `VIBE_STICK_PROVIDER=auto`，设置 `VIBE_STICK_CLAUDE_USAGE=on`，并确保 Claude Code CLI 已在终端通过 `claude` 和 `/login` 登录。
 
 - `VIBE_STICK_CLAUDE_USAGE`：设为 `on` 后获取真实 Claude Code 订阅用量；默认 `off`。
 - `CLAUDE_CODE_OAUTH_TOKEN`：可选 Claude Code OAuth access token。未设置时，bridge 会尝试读取本机 Claude Code keychain / 文件凭据。

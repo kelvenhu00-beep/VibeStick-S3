@@ -1,5 +1,21 @@
-VibeStick
-Copyright (c) 2026 Gary Zhang
+VibeStick-S3 is a modified distribution of VibeStick.
+
+Original project:
+  VibeStick by Gary Zhang
+  https://github.com/GaryGaryyy/VibeStick
+  Upstream baseline: d7dc0364423bf738a0ce5c697544b386678a1e62
+
+Original project and source portions:
+  Copyright (c) 2026 Gary Zhang
+
+Modifications in this distribution are maintained by:
+  kelvenhu00-beep
+  https://github.com/kelvenhu00-beep/VibeStick-S3
+
+The original copyright notice and the MIT License are retained in LICENSE.
+This distribution is not an official release of the upstream project.
+See docs/CHANGES_FROM_UPSTREAM.md for a summary of modifications and for
+instructions to inspect the exact source diff.
 
 This repository contains a generated LVGL glyph subset derived from Noto Sans SC Regular.
 

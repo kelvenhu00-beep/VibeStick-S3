@@ -2,11 +2,24 @@
 
 [中文说明](README.zh-CN.md)
 
+> **Source and attribution**
+>
+> This repository is a modified distribution of
+> [GaryGaryyy/VibeStick](https://github.com/GaryGaryyy/VibeStick). The original
+> project and source code are copyright Gary Zhang and are used and redistributed
+> under the MIT License. This version uses upstream commit
+> [`d7dc036`](https://github.com/GaryGaryyy/VibeStick/commit/d7dc0364423bf738a0ce5c697544b386678a1e62)
+> as its baseline and is further modified and maintained by `kelvenhu00-beep`.
+> Thank you to Gary Zhang for creating and open-sourcing VibeStick. This repository
+> is not an official upstream release. See
+> [Changes from upstream](docs/CHANGES_FROM_UPSTREAM.md) for the boundary between
+> the original work and this distribution's modifications.
+
 ![VibeStick home screen showing Codex and Claude providers](assets/brand/home-screen-preview.png)
 
 ![VibeStick voice input flow showing StickS3 recording states and Mac HUD](assets/brand/voice-input-preview.png)
 
-VibeStick turns an M5Stack StickS3 into a tiny desktop companion for coding agents: status, 5H/7D usage, alerts, and push-to-talk transcription into your Mac.
+VibeStick turns an M5Stack StickS3 into a tiny desktop companion for coding agents: status, 7D usage, alerts, and push-to-talk transcription into your Mac.
 
 VibeStick targets M5Stack StickS3 hardware and is not an official M5Stack project. Third-party agent names such as Codex and Claude describe compatible local tools and integrations only.
 
@@ -34,7 +47,7 @@ Real Wi-Fi credentials, API keys, and the generated shared token are excluded by
 - [ ] M5Stack StickS3 and a USB-C data cable.
 - [ ] A Mac. The USB-C data cable is the preferred runtime connection.
 - [ ] Wi-Fi name and password for automatic fallback. The Wi-Fi must be 2.4 GHz; StickS3 / ESP32-S3 does not support 5 GHz Wi-Fi.
-- [ ] To show Claude 5H/7D usage: this feature is off by default (safer). It needs the Claude Code CLI (run `claude` then `/login` in Terminal) and `VIBE_STICK_CLAUDE_USAGE=on` in `.env`.
+- [ ] To show Claude 7D usage: this feature is off by default (safer). It needs the Claude Code CLI (run `claude` then `/login` in Terminal) and `VIBE_STICK_CLAUDE_USAGE=on` in `.env`.
 - [ ] An ASR API key for speech transcription. Recommended: SiliconFlow at <https://cloud.siliconflow.cn/i/7ZCoy9fU>. It works directly in China, has free quota, and is OpenAI-compatible. The demo video uses SiliconFlow. You can also use another OpenAI-compatible ASR provider's `base_url` and model name instead.
 
 Building the firmware needs ESP-IDF v5.5.x — a one-time toolchain install (~1 GB, a few minutes). The install steps below set it up for you; no need to pre-install. Reference: Espressif's [ESP-IDF v5.5.1 ESP32-S3 guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/get-started/index.html).
@@ -127,7 +140,7 @@ Wait for `Hash of data verified`.
 ./scripts/doctor.sh
 ```
 
-Aim for all required checks to pass. Then glance at the StickS3: Codex / Claude status and 5H / 7D usage should show real values when the corresponding local provider data is available.
+Aim for all required checks to pass. Then glance at the StickS3: Codex / Claude status and 7D usage should show real values when the corresponding local provider data is available.
 
 If Codex works but the Claude column shows `--%`, that is expected: Claude usage is disabled by default (safer), so to display it set `VIBE_STICK_CLAUDE_USAGE=on` and make sure Claude Code is logged in via `claude` and `/login`.
 
@@ -240,7 +253,7 @@ The command receives the recording session JSON on stdin and should print the fi
 
 ### Claude usage
 
-To see Claude 5H/7D usage, use `VIBE_STICK_PROVIDER=claude` or `VIBE_STICK_PROVIDER=auto`, set `VIBE_STICK_CLAUDE_USAGE=on`, and make sure Claude Code CLI has logged in through Terminal with `claude` and `/login`.
+To see Claude 7D usage, use `VIBE_STICK_PROVIDER=claude` or `VIBE_STICK_PROVIDER=auto`, set `VIBE_STICK_CLAUDE_USAGE=on`, and make sure Claude Code CLI has logged in through Terminal with `claude` and `/login`.
 
 - `VIBE_STICK_CLAUDE_USAGE`: set to `on` to fetch real Claude Code subscription usage; default `off`.
 - `CLAUDE_CODE_OAUTH_TOKEN`: optional Claude Code OAuth access token. If unset, the bridge tries local Claude Code keychain/file credentials.
