@@ -66,7 +66,7 @@ Then complete three tasks:
 2. Follow the Install section below to build and flash the StickS3 firmware once. Flashing requires physically putting the device in download mode, so it cannot be fully automated.
 3. After flashing, run `./scripts/install.sh`, then verify everything with `./scripts/doctor.sh`.
 
-Real Wi-Fi credentials, API keys, and the generated shared token are excluded by `.gitignore` and must not be committed. The complete instructions below cover ESP-IDF, serial-port selection, flashing, and macOS permissions.
+The complete instructions below cover ESP-IDF, serial-port selection, flashing, and macOS permissions.
 
 After the first firmware installation, add or update Wi-Fi networks without
 editing source code or flashing again:
