@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +11,7 @@ from typing import Any
 
 from vibe_stick.codex.quota import QuotaSnapshot
 from vibe_stick.protocol.state import AgentStatus
-from vibe_stick.providers._jsonl import session_files, tail_json_events
+from vibe_stick.providers._jsonl import cached_session_files, cached_tail_json_events
 
 
 CODEX_HOME = Path.home() / ".codex"
@@ -19,6 +21,9 @@ MAX_SESSION_FILES = 40
 RUNNING_ACTIVITY_WINDOW = timedelta(minutes=4)
 ALERT_ACTIVITY_WINDOW = timedelta(minutes=5)
 QUOTA_STALE_AFTER = timedelta(minutes=30)
+OBSERVATION_CACHE_SECONDS = 1.0
+_observation_cache_lock = threading.RLock()
+_observation_cache: dict[tuple[Path, Path], tuple[float, "LocalCodexObservation"]] = {}
 
 
 @dataclass
@@ -37,6 +42,19 @@ class LocalCodexObservation:
 
 
 def observe_codex(project_root: Path) -> LocalCodexObservation:
+    cache_key = (project_root.resolve(), SESSIONS_DIR.resolve())
+    now_monotonic = time.monotonic()
+    with _observation_cache_lock:
+        cached = _observation_cache.get(cache_key)
+        if cached is not None and now_monotonic - cached[0] < OBSERVATION_CACHE_SECONDS:
+            return cached[1]
+    observation = _observe_codex_uncached(project_root)
+    with _observation_cache_lock:
+        _observation_cache[cache_key] = (now_monotonic, observation)
+    return observation
+
+
+def _observe_codex_uncached(project_root: Path) -> LocalCodexObservation:
     now = datetime.now(timezone.utc)
     codex_online = _codex_process_running()
     project = _project_name_from_env_or_root(project_root)
@@ -113,11 +131,11 @@ def observe_codex(project_root: Path) -> LocalCodexObservation:
 
 
 def _session_files() -> list[Path]:
-    return session_files(SESSIONS_DIR, max_files=MAX_SESSION_FILES)
+    return cached_session_files(SESSIONS_DIR, max_files=MAX_SESSION_FILES)
 
 
 def _tail_json_events(path: Path) -> list[dict[str, Any]]:
-    return list(tail_json_events(path, tail_bytes=TAIL_BYTES))
+    return list(cached_tail_json_events(path, tail_bytes=TAIL_BYTES))
 
 
 def _quota_from_payload(

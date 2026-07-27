@@ -12,6 +12,8 @@
 #define VIBE_STICK_RECORDING_STOP_PATH "/recording/stop"
 #define VIBE_STICK_RECORDING_CONFIRM_PATH "/recording/confirm"
 #define VIBE_STICK_RECORDING_CANCEL_PATH "/recording/cancel"
+#define VIBE_STICK_WIFI_PROFILES_PATH "/device/wifi"
+#define VIBE_STICK_WIFI_BOOTSTRAP_PATH "/device/wifi/bootstrap"
 #define VIBE_STICK_STATE_POLL_MS 2000
 #define VIBE_STICK_BRIDGE_SERVICE_TYPE "_vibestick"
 #define VIBE_STICK_BRIDGE_SERVICE_PROTOCOL "_tcp"

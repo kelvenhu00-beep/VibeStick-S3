@@ -12,6 +12,8 @@ CLAUDE_QUOTA_PATH = APP_SUPPORT_DIR / "claude-quota.json"
 RECORDING_PATH = APP_SUPPORT_DIR / "recording.json"
 HUD_STATE_PATH = APP_SUPPORT_DIR / "hud-state.json"
 RECORDINGS_DIR = APP_SUPPORT_DIR / "Recordings"
+WIFI_PROFILES_PATH = APP_SUPPORT_DIR / "wifi-networks.json"
+INSTANCE_LOCK_PATH = APP_SUPPORT_DIR / "bridge.lock"
 
 
 def ensure_app_support() -> Path:

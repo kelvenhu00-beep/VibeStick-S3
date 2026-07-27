@@ -37,12 +37,16 @@ VibeStick targets M5Stack StickS3 hardware and is not an official M5Stack projec
   alert; double-click requests a fresh usage reading.
 - **Side button, single-click:** switch between the enabled Codex and Claude
   provider views.
+- **Reset/power button:** single-click resets or powers on the StickS3;
+  double-click powers it off; long-press enters download mode.
 - **Connection lines:** `USB` means the runtime data cable is active, `WIFI`
   means HTTP fallback is active, and `OFF` means neither bridge path is
   available. The second line shows the connected Wi-Fi name or `TRY <name>`
   while a saved profile is being attempted.
 - **Usage:** the device UI intentionally shows only remaining `7D` usage. The
   removed 5-hour card is not part of the current screen.
+- **Power saving:** after 60 seconds without button activity, the screen
+  backlight dims automatically and wakes on the next button action.
 
 ## Fastest deployment (macOS)
 
@@ -57,12 +61,25 @@ cd VibeStick
 
 Then complete three tasks:
 
-1. Fill the generated `firmware/sticks3/include/vibe_stick_secrets.h` with one
-   or more 2.4 GHz Wi-Fi networks, and put the transcription API key in `.env`.
+1. Fill the generated `firmware/sticks3/include/vibe_stick_secrets.h` with an
+   initial 2.4 GHz Wi-Fi network, and put the transcription API key in `.env`.
 2. Follow the Install section below to build and flash the StickS3 firmware once. Flashing requires physically putting the device in download mode, so it cannot be fully automated.
 3. After flashing, run `./scripts/install.sh`, then verify everything with `./scripts/doctor.sh`.
 
 Real Wi-Fi credentials, API keys, and the generated shared token are excluded by `.gitignore` and must not be committed. The complete instructions below cover ESP-IDF, serial-port selection, flashing, and macOS permissions.
+
+After the first firmware installation, add or update Wi-Fi networks without
+editing source code or flashing again:
+
+```sh
+./scripts/wifi.sh add "Wi-Fi name"
+./scripts/wifi.sh list
+./scripts/wifi.sh remove "Old Wi-Fi name"
+```
+
+The password prompt is hidden. Keep the StickS3 connected by USB for at least
+five seconds after a change. The bridge sends the profile only through the USB
+runtime protocol, and the StickS3 saves up to eight profiles in NVS.
 
 ## What you'll need (prepare first)
 
@@ -341,11 +358,15 @@ idf.py build
 - Codex quota is inferred from local Codex session JSONL events with `rate_limits`; it is not an official quota API.
 - Claude usage comes from an undocumented Claude Code OAuth endpoint and is disabled by default.
 - A single device recording is limited to 55 seconds.
+- Audio upload must receive an `audio_ready` acknowledgement for the same
+  recording session before transcription starts.
 - USB sends the captured 16 kHz / 16-bit / mono PCM directly. Wi-Fi compresses
   the same samples with IMA ADPCM for transport, and the bridge reconstructs PCM
   before writing the WAV file and running ASR.
 - ASR reliability depends on microphone capture, network quality, provider
   availability, and the configured model.
+- Bridge state and quota files use atomic change-only writes. Codex session
+  tails are incrementally cached, logs rotate, and old recordings are pruned.
 
 ## Contributing & Security
 

@@ -14,6 +14,11 @@ RUNNER_PATH="$CONFIG_DIR/run-bridge.sh"
 HUD_BINARY_PATH="$CONFIG_DIR/VibeStickHUD"
 HUD_SOURCE_PATH="$ROOT_DIR/app/macos/VibeStickHUD/main.swift"
 
+if [ ! -f "$ENV_PATH" ] && [ -f "$CONFIG_DIR/.env" ]; then
+  cp "$CONFIG_DIR/.env" "$ENV_PATH"
+  printf '%s\n' "Recovered the existing runtime .env before setup."
+fi
+
 is_placeholder_token() {
   case "${1:-}" in
     ""|change-this-shared-token|paste-generated-token-here|changeme|change-me|your-token)
@@ -95,7 +100,12 @@ rm -rf "$RUNTIME_DIR"
 mkdir -p "$RUNTIME_DIR"
 cp -R "$ROOT_DIR/bridge" "$RUNTIME_DIR/bridge"
 if [ -f "$ENV_PATH" ]; then
+  if [ -f "$CONFIG_DIR/.env" ]; then
+    cp "$CONFIG_DIR/.env" "$CONFIG_DIR/.env.backup"
+    chmod 600 "$CONFIG_DIR/.env.backup"
+  fi
   cp "$ENV_PATH" "$CONFIG_DIR/.env"
+  chmod 600 "$CONFIG_DIR/.env"
 fi
 swiftc "$HUD_SOURCE_PATH" -o "$HUD_BINARY_PATH" -framework AppKit -framework QuartzCore
 cat > "$RUNNER_PATH" <<RUNNER

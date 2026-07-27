@@ -32,8 +32,12 @@ release.
 - Added Bonjour bridge discovery so changing DHCP addresses does not require a
   firmware configuration change.
 - Added multiple-known-Wi-Fi support in the firmware secrets example.
+- Added USB-only management for up to eight Wi-Fi profiles, stored in the
+  StickS3 NVS, so networks can be added without rebuilding firmware.
 - Added automatic saved-network rotation when association or repeated Mac
   bridge discovery fails.
+- Added a Bonjour watchdog that re-registers the bridge after process failure
+  or a Mac network change.
 - Added the on-device `USB`, `WIFI`, and `OFF` connection indicator plus the
   connected or attempted Wi-Fi name.
 
@@ -43,10 +47,15 @@ release.
   for transcription: raw PCM over USB and IMA ADPCM over Wi-Fi.
 - Added upload size limits, compact responses, retry/timeout handling, stale
   recording expiry, and recording diagnostics.
+- Added a locked recording state machine that requires a matching
+  `audio_ready` acknowledgement before stop and rejects cross-session
+  transitions.
 - Added a 55-second firmware recording limit and a missed-release recovery path.
 - Retained an optional Mac microphone fallback.
 - Added a confirmation stage after recognized text is pasted:
   single-click submits the text and double-click clears it.
+- Added focused-window validation before submit or clear so a delayed device
+  action cannot target a different application window.
 - Added English on-device recording states to avoid missing Chinese glyphs.
 
 ### Device interface
@@ -54,12 +63,18 @@ release.
 - Removed the obsolete 5H card from the StickS3 screen and retained the 7D
   usage view.
 - Reworked the recording overlay and connection-status presentation.
+- Split firmware UI, network, and audio work across dedicated tasks and added
+  automatic backlight dimming after inactivity.
 - Updated firmware configuration, component dependencies, generated font
   subset, and UI layout for the new workflow.
 
 ### Local bridge, deployment, and tests
 
 - Added paste confirmation and clear operations to the bridge.
+- Added incremental Codex session scanning, in-memory observation caching,
+  atomic change-only state writes, and a single-instance process lock.
+- Added HTTP disconnect handling, log rotation, and recording retention.
+- Changed the macOS HUD from repeated polling to file-change notifications.
 - Added USB and Bonjour diagnostics to `scripts/doctor.sh`.
 - Added `scripts/preflight.sh` and a shorter public deployment path.
 - Expanded automated coverage for USB transport, discovery, recording

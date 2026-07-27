@@ -7,6 +7,7 @@
 #include "vibe_board.h"
 #include "vibe_stick_config.h"
 #include "vibe_usb.h"
+#include "vibe_wifi.h"
 #include "button_gpio.h"
 #include "cJSON.h"
 #include "driver/gpio.h"
@@ -44,15 +45,21 @@
 #define LCD_BACKLIGHT_PWM_HZ 5000
 #define LCD_BACKLIGHT_PWM_MAX 255
 #define LCD_BACKLIGHT_DEFAULT 150
+#define LCD_BACKLIGHT_DIMMED 35
+#define LCD_DIM_AFTER_MS 60000
 #define LVGL_DRAW_BUF_LINES 24
 #define LVGL_TICK_PERIOD_MS 10
 #define BATTERY_FILL_MAX_WIDTH 20
 #define AUDIO_UPLOAD_TX_BUFFER_SIZE 8192
 #define AUDIO_UPLOAD_TIMEOUT_MS 60000
+#define AUDIO_UPLOAD_ATTEMPTS 3
+#define AUDIO_UPLOAD_RETRY_DELAY_MS 500
 #define RECORDING_STOP_TIMEOUT_MS 60000
 #define RECORDING_RELEASE_DEBOUNCE_MS 80
 #define RECORDING_HARD_LIMIT_MS 55000
 #define BRIDGE_FAILURES_BEFORE_WIFI_ROTATE 5
+#define WIFI_CONNECT_FAILURES_BEFORE_ROTATE 2
+#define WIFI_PROFILE_SYNC_MS 5000
 
 #define PIN_BUTTON_FRONT 11
 #define PIN_BUTTON_SIDE 12
@@ -131,23 +138,13 @@ typedef struct {
     int used;
 } http_response_capture_t;
 
-typedef struct {
-    const char *ssid;
-    const char *password;
-} wifi_credential_t;
-
-#ifdef VIBE_STICK_WIFI_NETWORKS
-static const wifi_credential_t s_wifi_networks[] = VIBE_STICK_WIFI_NETWORKS;
-#else
-static const wifi_credential_t s_wifi_networks[] = {
-    {VIBE_STICK_WIFI_SSID, VIBE_STICK_WIFI_PASSWORD},
-};
-#endif
-
 static QueueHandle_t s_event_queue;
 static SemaphoreHandle_t s_lvgl_lock;
+static SemaphoreHandle_t s_bridge_request_lock;
 static bool s_wifi_connected;
 static size_t s_wifi_network_index;
+static unsigned s_wifi_profile_failure_count;
+static bool s_wifi_rotation_requested;
 static char s_bridge_host[64] = VIBE_STICK_BRIDGE_HOST;
 static uint16_t s_bridge_port = VIBE_STICK_BRIDGE_PORT;
 static bool s_bridge_discovery_required = VIBE_STICK_BRIDGE_DISCOVERY;
@@ -160,6 +157,8 @@ static char s_last_alert_event_id[56];
 static char s_last_alert_type[24];
 static bool s_alert_sound_baseline_ready;
 static char s_recording_session_id[40];
+static int64_t s_last_user_activity_ms;
+static bool s_backlight_dimmed;
 
 static lv_display_t *s_display;
 static lv_obj_t *s_wifi_label;
@@ -494,6 +493,30 @@ static void set_backlight(uint8_t brightness)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
+static void mark_user_activity(void)
+{
+    s_last_user_activity_ms = esp_timer_get_time() / 1000;
+    if (s_backlight_dimmed) {
+        set_backlight(LCD_BACKLIGHT_DEFAULT);
+        s_backlight_dimmed = false;
+    }
+}
+
+static void maybe_dim_display(void)
+{
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (s_recording_overlay_visible || vibe_audio_is_recording()) {
+        s_last_user_activity_ms = now_ms;
+        return;
+    }
+    if (!s_backlight_dimmed &&
+        s_last_user_activity_ms > 0 &&
+        now_ms - s_last_user_activity_ms >= LCD_DIM_AFTER_MS) {
+        set_backlight(LCD_BACKLIGHT_DIMMED);
+        s_backlight_dimmed = true;
+    }
+}
+
 static void init_backlight(void)
 {
     ledc_timer_config_t timer = {
@@ -514,6 +537,7 @@ static void init_backlight(void)
     };
     ESP_ERROR_CHECK(ledc_channel_config(&channel));
     set_backlight(LCD_BACKLIGHT_DEFAULT);
+    s_last_user_activity_ms = esp_timer_get_time() / 1000;
 }
 
 static esp_err_t init_display(void)
@@ -868,6 +892,26 @@ static void set_status_color(const agent_provider_config_t *provider, const char
     lv_obj_set_style_bg_color(s_status_dot, color, 0);
 }
 
+static void current_wifi_name(char *name, size_t name_len)
+{
+    if (!name || name_len == 0) {
+        return;
+    }
+    name[0] = '\0';
+    if (s_wifi_connected) {
+        wifi_ap_record_t ap_info = {0};
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            strlcpy(name, (const char *)ap_info.ssid, name_len);
+            return;
+        }
+    }
+    size_t count = vibe_wifi_profile_count();
+    vibe_wifi_profile_t profile = {0};
+    if (count > 0 && vibe_wifi_profile_copy(s_wifi_network_index % count, &profile)) {
+        strlcpy(name, profile.ssid, name_len);
+    }
+}
+
 static void render_state(void)
 {
     lvgl_lock();
@@ -884,10 +928,8 @@ static void render_state(void)
     lv_obj_set_style_text_color(s_wifi_label,
                                 bridge_transport_available ? lv_color_hex(0xf3f4f6) : lv_color_hex(0x686e78),
                                 0);
-    size_t network_count = sizeof(s_wifi_networks) / sizeof(s_wifi_networks[0]);
-    const char *network_name = network_count > 0
-        ? s_wifi_networks[s_wifi_network_index % network_count].ssid
-        : "";
+    char network_name[VIBE_WIFI_SSID_BYTES] = {0};
+    current_wifi_name(network_name, sizeof(network_name));
     char network_text[48] = {0};
     if (s_wifi_connected) {
         strlcpy(network_text, network_name, sizeof(network_text));
@@ -1252,19 +1294,25 @@ static esp_err_t http_post_binary(const char *path, const uint8_t *body, size_t 
 static esp_err_t bridge_request_timeout(const char *method, const char *path, const char *body,
                                         char *response, int response_len, int timeout_ms)
 {
+    if (!s_bridge_request_lock ||
+        xSemaphoreTake(s_bridge_request_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err;
     if (vibe_usb_ready()) {
-        esp_err_t err = vibe_usb_request(method, path, body, response, response_len, timeout_ms);
+        err = vibe_usb_request(method, path, body, response, response_len, timeout_ms);
         ESP_LOGI(TAG, "bridge %s %s transport=USB result=%s",
                  method, path, esp_err_to_name(err));
-        return err;
-    }
-    if (!s_wifi_connected) {
+    } else if (!s_wifi_connected) {
         if (response && response_len > 0) {
             response[0] = '\0';
         }
-        return ESP_ERR_INVALID_STATE;
+        err = ESP_ERR_INVALID_STATE;
+    } else {
+        err = http_request_timeout(method, path, body, response, response_len, timeout_ms);
     }
-    return http_request_timeout(method, path, body, response, response_len, timeout_ms);
+    xSemaphoreGive(s_bridge_request_lock);
+    return err;
 }
 
 static esp_err_t bridge_request(const char *method, const char *path, const char *body,
@@ -1273,8 +1321,8 @@ static esp_err_t bridge_request(const char *method, const char *path, const char
     return bridge_request_timeout(method, path, body, response, response_len, 2500);
 }
 
-static esp_err_t bridge_post_audio(const uint8_t *body, size_t body_len,
-                                   char *response, int response_len)
+static esp_err_t bridge_post_audio_unlocked(const uint8_t *body, size_t body_len,
+                                            char *response, int response_len)
 {
     if (vibe_usb_ready()) {
         int64_t started_us = esp_timer_get_time();
@@ -1299,7 +1347,7 @@ static esp_err_t bridge_post_audio(const uint8_t *body, size_t body_len,
         return ESP_ERR_INVALID_STATE;
     }
     char path[96];
-    snprintf(path, sizeof(path), "%s?session_id=%s",
+    snprintf(path, sizeof(path), "%s?compact=1&session_id=%s",
              VIBE_STICK_RECORDING_AUDIO_PATH, s_recording_session_id);
     size_t sample_count = body_len / sizeof(int16_t);
     size_t encoded_len = 0;
@@ -1313,6 +1361,18 @@ static esp_err_t bridge_post_audio(const uint8_t *body, size_t body_len,
     esp_err_t err = http_post_binary(path, encoded, encoded_len, "ima-adpcm",
                                      sample_count, response, response_len);
     free(encoded);
+    return err;
+}
+
+static esp_err_t bridge_post_audio(const uint8_t *body, size_t body_len,
+                                   char *response, int response_len)
+{
+    if (!s_bridge_request_lock ||
+        xSemaphoreTake(s_bridge_request_lock, pdMS_TO_TICKS(AUDIO_UPLOAD_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err = bridge_post_audio_unlocked(body, body_len, response, response_len);
+    xSemaphoreGive(s_bridge_request_lock);
     return err;
 }
 
@@ -1495,7 +1555,7 @@ static void poll_state(void)
     }
     esp_err_t err = bridge_request("GET", VIBE_STICK_STATE_PATH, NULL, response, sizeof(response));
     if (err != ESP_OK || response[0] == '\0' || !parse_state_json(response)) {
-        size_t network_count = sizeof(s_wifi_networks) / sizeof(s_wifi_networks[0]);
+        size_t network_count = vibe_wifi_profile_count();
         if (!vibe_usb_ready() &&
             s_wifi_connected &&
             network_count > 1 &&
@@ -1508,8 +1568,10 @@ static void poll_state(void)
                 s_bridge_discovery_required = VIBE_STICK_BRIDGE_DISCOVERY;
                 ESP_LOGW(TAG, "bridge unreachable; rotating from Wi-Fi profile %u of %u",
                          (unsigned)(s_wifi_network_index + 1), (unsigned)network_count);
+                s_wifi_rotation_requested = true;
                 esp_err_t disconnect_err = esp_wifi_disconnect();
                 if (disconnect_err != ESP_OK) {
+                    s_wifi_rotation_requested = false;
                     ESP_LOGW(TAG, "Wi-Fi profile rotation failed: %s",
                              esp_err_to_name(disconnect_err));
                 }
@@ -1603,24 +1665,50 @@ static void generate_recording_session_id(char *session_id, size_t session_id_le
     session_id[32] = '\0';
 }
 
-static void upload_recording_audio(void)
+static bool upload_recording_audio(void)
 {
     size_t audio_len = 0;
     const uint8_t *audio = vibe_audio_data(&audio_len);
     if (!audio || audio_len == 0 || s_recording_session_id[0] == '\0') {
         ESP_LOGW(TAG, "skip audio upload audio=%p len=%u session=%s",
                  audio, (unsigned)audio_len, s_recording_session_id);
-        return;
+        return false;
     }
-    char response[768] = {0};
-    esp_err_t err = bridge_post_audio(audio, audio_len, response, sizeof(response));
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "audio upload failed: %s", esp_err_to_name(err));
-        return;
+    for (int attempt = 1; attempt <= AUDIO_UPLOAD_ATTEMPTS; ++attempt) {
+        char response[768] = {0};
+        esp_err_t err = bridge_post_audio(audio, audio_len, response, sizeof(response));
+        char response_session_id[40] = {0};
+        char recording_status[32] = {0};
+        bool acknowledged =
+            err == ESP_OK &&
+            response[0] != '\0' &&
+            parse_recording_session_id(
+                response,
+                response_session_id,
+                sizeof(response_session_id)
+            ) &&
+            strcmp(response_session_id, s_recording_session_id) == 0 &&
+            parse_recording_status(response, recording_status, sizeof(recording_status)) &&
+            strcmp(recording_status, "audio_ready") == 0;
+        if (acknowledged) {
+            if (parse_state_json(response)) {
+                render_state();
+            }
+            ESP_LOGI(TAG, "audio upload confirmed session=%s attempt=%d",
+                     s_recording_session_id, attempt);
+            return true;
+        }
+        ESP_LOGW(TAG,
+                 "audio upload not confirmed session=%s attempt=%d err=%s status=%s",
+                 s_recording_session_id,
+                 attempt,
+                 esp_err_to_name(err),
+                 recording_status);
+        if (attempt < AUDIO_UPLOAD_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(AUDIO_UPLOAD_RETRY_DELAY_MS));
+        }
     }
-    if (response[0] != '\0' && parse_state_json(response)) {
-        render_state();
-    }
+    return false;
 }
 
 static void handle_recording_start(void)
@@ -1647,20 +1735,31 @@ static void handle_recording_start(void)
              s_recording_session_id);
     char response[1024] = {0};
     esp_err_t err = bridge_request("POST", VIBE_STICK_RECORDING_START_PATH, body, response, sizeof(response));
-    if (err == ESP_OK && response[0] != '\0') {
-        char response_session_id[40] = {0};
-        parse_recording_session_id(response, response_session_id, sizeof(response_session_id));
-        if (response_session_id[0] != '\0' &&
-            strcmp(response_session_id, s_recording_session_id) != 0) {
-            ESP_LOGW(TAG, "bridge returned a different recording session id");
-        }
+    char response_session_id[40] = {0};
+    char recording_status[32] = {0};
+    bool start_acknowledged =
+        err == ESP_OK &&
+        response[0] != '\0' &&
+        parse_recording_session_id(response, response_session_id, sizeof(response_session_id)) &&
+        strcmp(response_session_id, s_recording_session_id) == 0 &&
+        parse_recording_status(response, recording_status, sizeof(recording_status)) &&
+        strcmp(recording_status, "recording") == 0;
+    if (start_acknowledged) {
         if (parse_state_json(response)) {
             render_state();
         }
     } else {
-        ESP_LOGW(TAG, "recording start bridge request failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "recording start not confirmed err=%s status=%s",
+                 esp_err_to_name(err), recording_status);
+        (void)vibe_audio_stop();
+        vibe_audio_clear();
+        s_recording_started_ms = 0;
+        s_recording_session_id[0] = '\0';
+        s_long_press_active = false;
+        show_recording_overlay("START FAILED", "", true);
+        vTaskDelay(pdMS_TO_TICKS(900));
+        show_recording_overlay(NULL, NULL, false);
     }
-
 }
 
 static void handle_recording_stop(void)
@@ -1680,11 +1779,25 @@ static void handle_recording_stop(void)
         ESP_LOGW(TAG, "hardware recording stop failed: %s", esp_err_to_name(audio_err));
     }
 
-    upload_recording_audio();
+    bool upload_confirmed = upload_recording_audio();
+    if (!upload_confirmed) {
+        ESP_LOGW(TAG, "recording stop suppressed because upload was not confirmed");
+        vibe_audio_clear();
+        s_recording_session_id[0] = '\0';
+        show_recording_overlay("UPLOAD FAILED", "Try again", true);
+        vTaskDelay(pdMS_TO_TICKS(1200));
+        poll_state();
+        show_recording_overlay(NULL, NULL, false);
+        return;
+    }
     vibe_audio_clear();
 
     show_recording_overlay("TRANSCRIBING", "", true);
-    const char *body = "{\"event\":\"button_long_stop\",\"source\":\"sticks3\",\"paste\":true}";
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"event\":\"button_long_stop\",\"source\":\"sticks3\","
+             "\"paste\":true,\"session_id\":\"%s\"}",
+             s_recording_session_id);
     char response[1024] = {0};
     esp_err_t err = bridge_request_timeout("POST", VIBE_STICK_RECORDING_STOP_PATH "?compact=1",
                                            body, response, sizeof(response), RECORDING_STOP_TIMEOUT_MS);
@@ -1750,35 +1863,72 @@ static void handle_recording_confirmation(bool confirm)
     show_recording_overlay(NULL, NULL, false);
 }
 
+static esp_err_t configure_wifi_profile(size_t index)
+{
+    vibe_wifi_profile_t profile = {0};
+    ESP_RETURN_ON_FALSE(vibe_wifi_profile_copy(index, &profile),
+                        ESP_ERR_NOT_FOUND, TAG, "Wi-Fi profile missing");
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, profile.ssid, sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, profile.password, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode =
+        profile.password[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+    return esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+}
+
+static bool wifi_reason_requires_rotation(uint8_t reason)
+{
+    return reason == WIFI_REASON_NO_AP_FOUND ||
+           reason == WIFI_REASON_AUTH_FAIL ||
+           reason == WIFI_REASON_HANDSHAKE_TIMEOUT ||
+           reason == WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY ||
+           reason == WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD ||
+           reason == WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD;
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     (void)arg;
-    (void)event_data;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_connected = false;
-        size_t network_count = sizeof(s_wifi_networks) / sizeof(s_wifi_networks[0]);
-        if (network_count > 1) {
+        size_t network_count = vibe_wifi_profile_count();
+        const wifi_event_sta_disconnected_t *disconnected =
+            (const wifi_event_sta_disconnected_t *)event_data;
+        uint8_t reason = disconnected ? disconnected->reason : WIFI_REASON_UNSPECIFIED;
+        bool rotate = s_wifi_rotation_requested;
+        s_wifi_rotation_requested = false;
+        if (!rotate) {
+            s_wifi_profile_failure_count++;
+            rotate = wifi_reason_requires_rotation(reason) ||
+                     s_wifi_profile_failure_count >= WIFI_CONNECT_FAILURES_BEFORE_ROTATE;
+        }
+        if (rotate && network_count > 1) {
             s_wifi_network_index = (s_wifi_network_index + 1) % network_count;
-            const wifi_credential_t *network = &s_wifi_networks[s_wifi_network_index];
-            wifi_config_t wifi_config = {0};
-            strlcpy((char *)wifi_config.sta.ssid, network->ssid, sizeof(wifi_config.sta.ssid));
-            strlcpy((char *)wifi_config.sta.password, network->password, sizeof(wifi_config.sta.password));
-            wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-            esp_err_t config_err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+            s_wifi_profile_failure_count = 0;
+            esp_err_t config_err = configure_wifi_profile(s_wifi_network_index);
             if (config_err != ESP_OK) {
                 ESP_LOGW(TAG, "switch Wi-Fi profile failed: %s", esp_err_to_name(config_err));
             } else {
                 ESP_LOGI(TAG, "trying Wi-Fi profile %u of %u",
                          (unsigned)(s_wifi_network_index + 1), (unsigned)network_count);
             }
+        } else {
+            ESP_LOGI(TAG, "retrying Wi-Fi profile %u of %u reason=%u failure=%u",
+                     (unsigned)(s_wifi_network_index + 1),
+                     (unsigned)network_count,
+                     (unsigned)reason,
+                     s_wifi_profile_failure_count);
         }
         esp_wifi_connect();
         render_state();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         s_wifi_connected = true;
+        s_wifi_profile_failure_count = 0;
+        s_wifi_rotation_requested = false;
+        s_bridge_failure_count = 0;
         s_bridge_discovery_required = VIBE_STICK_BRIDGE_DISCOVERY;
         render_state();
         queue_event(VIBE_STICK_EVENT_POLL_STATE);
@@ -1787,8 +1937,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
 static esp_err_t init_wifi(void)
 {
-    size_t network_count = sizeof(s_wifi_networks) / sizeof(s_wifi_networks[0]);
-    if (network_count == 0 || !s_wifi_networks[0].ssid || strlen(s_wifi_networks[0].ssid) == 0) {
+    size_t network_count = vibe_wifi_profile_count();
+    if (network_count == 0) {
         ESP_LOGW(TAG, "no Wi-Fi profiles configured; Wi-Fi disabled");
         return ESP_OK;
     }
@@ -1800,21 +1950,112 @@ static esp_err_t init_wifi(void)
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init");
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
-    wifi_config_t wifi_config = {0};
-    strlcpy((char *)wifi_config.sta.ssid, s_wifi_networks[0].ssid, sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password, s_wifi_networks[0].password, sizeof(wifi_config.sta.password));
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "wifi mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_config), TAG, "wifi config");
+    ESP_RETURN_ON_ERROR(configure_wifi_profile(0), TAG, "wifi config");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
     ESP_LOGI(TAG, "configured %u Wi-Fi profile(s)", (unsigned)network_count);
     return ESP_OK;
+}
+
+static esp_err_t bootstrap_wifi_profiles_to_usb(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *profiles = cJSON_CreateArray();
+    if (!root || !profiles) {
+        cJSON_Delete(root);
+        cJSON_Delete(profiles);
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddItemToObject(root, "profiles", profiles);
+    size_t count = vibe_wifi_profile_count();
+    for (size_t i = 0; i < count; ++i) {
+        vibe_wifi_profile_t profile = {0};
+        if (!vibe_wifi_profile_copy(i, &profile)) {
+            cJSON_Delete(root);
+            return ESP_FAIL;
+        }
+        cJSON *item = cJSON_CreateObject();
+        if (!item ||
+            !cJSON_AddStringToObject(item, "ssid", profile.ssid) ||
+            !cJSON_AddStringToObject(item, "password", profile.password)) {
+            cJSON_Delete(item);
+            cJSON_Delete(root);
+            return ESP_ERR_NO_MEM;
+        }
+        cJSON_AddItemToArray(profiles, item);
+    }
+
+    char body[1536] = {0};
+    bool encoded = cJSON_PrintPreallocated(root, body, sizeof(body), false);
+    cJSON_Delete(root);
+    if (!encoded) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    char response[256] = {0};
+    return bridge_request_timeout(
+        "POST",
+        VIBE_STICK_WIFI_BOOTSTRAP_PATH,
+        body,
+        response,
+        sizeof(response),
+        2500
+    );
+}
+
+static void maybe_sync_wifi_profiles(void)
+{
+    static int64_t last_attempt_ms;
+    if (!vibe_usb_ready()) {
+        last_attempt_ms = 0;
+        return;
+    }
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (last_attempt_ms > 0 && now_ms - last_attempt_ms < WIFI_PROFILE_SYNC_MS) {
+        return;
+    }
+    last_attempt_ms = now_ms;
+
+    char response[2048] = {0};
+    esp_err_t err = bridge_request_timeout(
+        "GET",
+        VIBE_STICK_WIFI_PROFILES_PATH,
+        NULL,
+        response,
+        sizeof(response),
+        2500
+    );
+    if (err != ESP_OK || response[0] == '\0') {
+        ESP_LOGW(TAG, "USB Wi-Fi profile sync unavailable: %s", esp_err_to_name(err));
+        return;
+    }
+    bool changed = false;
+    err = vibe_wifi_profiles_apply_json(response, &changed);
+    if (err == ESP_ERR_NOT_FOUND) {
+        err = bootstrap_wifi_profiles_to_usb();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "initialized Mac Wi-Fi profile list over USB");
+        } else {
+            ESP_LOGW(TAG, "USB Wi-Fi profile initialization failed: %s", esp_err_to_name(err));
+        }
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "USB Wi-Fi profile sync rejected: %s", esp_err_to_name(err));
+        return;
+    }
+    if (changed) {
+        size_t count = vibe_wifi_profile_count();
+        s_wifi_network_index = count > 0 ? s_wifi_network_index % count : 0;
+        ESP_LOGI(TAG, "USB Wi-Fi profiles updated; %u profile(s) available", (unsigned)count);
+        render_state();
+    }
 }
 
 static void button_single_click_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
+    mark_user_activity();
     ESP_LOGI(TAG, "front button single click");
     queue_event(VIBE_STICK_EVENT_SHORT_PRESS);
 }
@@ -1823,6 +2064,7 @@ static void button_double_click_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
+    mark_user_activity();
     ESP_LOGI(TAG, "front button double click");
     queue_event(VIBE_STICK_EVENT_DOUBLE_CLICK);
 }
@@ -1831,6 +2073,7 @@ static void side_button_single_click_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
+    mark_user_activity();
     queue_event(VIBE_STICK_EVENT_PROVIDER_NEXT);
 }
 
@@ -1838,6 +2081,7 @@ static void button_long_start_cb(void *button_handle, void *usr_data)
 {
     (void)button_handle;
     (void)usr_data;
+    mark_user_activity();
     ESP_LOGI(TAG, "front button long press start");
     s_long_press_active = true;
     queue_event(VIBE_STICK_EVENT_LONG_START);
@@ -1930,15 +2174,8 @@ static void app_task(void *arg)
 {
     (void)arg;
     agent_event_t event;
-    int64_t last_poll = 0;
     while (true) {
         recover_missed_button_release();
-        int64_t now_ms = esp_timer_get_time() / 1000;
-        if ((s_wifi_connected || vibe_usb_ready()) &&
-            now_ms - last_poll >= VIBE_STICK_STATE_POLL_MS) {
-            last_poll = now_ms;
-            poll_state();
-        }
         if (xQueueReceive(s_event_queue, &event, pdMS_TO_TICKS(100)) != pdTRUE) {
             continue;
         }
@@ -1978,6 +2215,23 @@ static void app_task(void *arg)
     }
 }
 
+static void network_task(void *arg)
+{
+    (void)arg;
+    int64_t last_poll = 0;
+    while (true) {
+        maybe_sync_wifi_profiles();
+        maybe_dim_display();
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if ((s_wifi_connected || vibe_usb_ready()) &&
+            now_ms - last_poll >= VIBE_STICK_STATE_POLL_MS) {
+            last_poll = now_ms;
+            poll_state();
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "boot %s version=%s build=%s %s transport=%s",
@@ -1991,8 +2245,13 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(vibe_board_init_power());
+    ESP_ERROR_CHECK(vibe_wifi_profiles_init());
     s_event_queue = xQueueCreate(10, sizeof(agent_event_t));
     s_lvgl_lock = xSemaphoreCreateMutex();
+    s_bridge_request_lock = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(s_event_queue && s_lvgl_lock && s_bridge_request_lock
+                        ? ESP_OK
+                        : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(init_display());
     lvgl_lock();
     create_ui();
@@ -2003,4 +2262,5 @@ void app_main(void)
     ESP_ERROR_CHECK(vibe_usb_init());
     ESP_ERROR_CHECK(init_wifi());
     xTaskCreate(app_task, "agent_app", 6144, NULL, 4, NULL);
+    xTaskCreate(network_task, "agent_network", 6144, NULL, 3, NULL);
 }

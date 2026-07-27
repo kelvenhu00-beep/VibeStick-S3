@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from vibe_stick import __version__ as BRIDGE_VERSION
+from vibe_stick.config.wifi_profiles import bootstrap_wifi_profiles, usb_wifi_payload
 
 PROTOCOL_PREFIX = "@VBS1"
 USB_PORT_GLOB = "/dev/cu.usbmodem*"
@@ -145,6 +146,11 @@ class USBProtocol:
             payload["bridge_name"] = "vibestick-bridge"
             payload["bridge_version"] = BRIDGE_VERSION
             return 200, payload
+        if method == "GET" and path == "/device/wifi":
+            return 200, usb_wifi_payload()
+        if method == "POST" and path == "/device/wifi/bootstrap":
+            created = bootstrap_wifi_profiles(body)
+            return 200, {"created": created}
         if method != "POST":
             return 404, {"error": "Unknown endpoint"}
         if path == "/event":

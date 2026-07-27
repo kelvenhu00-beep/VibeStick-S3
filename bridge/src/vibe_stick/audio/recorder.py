@@ -6,15 +6,18 @@ import os
 import signal
 import struct
 import subprocess
+import threading
 import time
 import wave
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from vibe_stick.audio.transcriber import TranscriptionAdapter
+from vibe_stick.config.atomic_file import atomic_write_text_if_changed
 from vibe_stick.config.paths import RECORDINGS_DIR
 from vibe_stick.desktop.hud import hide_hud, show_hud
 from vibe_stick.paste.input_injector import MacPasteInjector
@@ -31,6 +34,16 @@ KNOWN_ASR_HALLUCINATIONS = (
     "\u8bf7\u4e0d\u541d\u70b9\u8d5e\u8ba2\u9605\u8f6c\u53d1\u6253\u8d4f\u652f\u6301\u660e\u955c\u4e0e\u70b9\u70b9\u680f\u76ee",
     "\u8bf7\u4f7f\u7528\u7b80\u4f53\u4e2d\u6587\u8f93\u51fa\u3002",
 )
+_RecordingMethod = TypeVar("_RecordingMethod", bound=Callable[..., Any])
+
+
+def _session_locked(method: _RecordingMethod) -> _RecordingMethod:
+    @wraps(method)
+    def wrapper(self: "RecordingController", *args: Any, **kwargs: Any) -> Any:
+        with self._session_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
 
 
 @dataclass
@@ -66,15 +79,31 @@ class RecordingController:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._session_lock = threading.RLock()
         self.transcriber = TranscriptionAdapter()
         self.paste_injector = MacPasteInjector()
         self.audio_recorder = MacMicRecorder()
         self.session = self._load()
 
+    @_session_locked
     def start(self, request: dict[str, Any] | None = None) -> RecordingSession:
         request = request or {}
         requested_source = str(request.get("audio_source") or request.get("source") or "")
         requested_session_id = _requested_session_id(request)
+        if self.session.active:
+            if requested_session_id and requested_session_id == self.session.session_id:
+                return self.session
+            if self.session.status != "recording" or self.session.audio_source != "sticks3_pcm":
+                return self._rejected(
+                    "start_conflict",
+                    "Another recording session is already active",
+                    requested_session_id,
+                )
+            print(
+                "recording session superseded "
+                f"old_session={self.session.session_id} new_session={requested_session_id}",
+                flush=True,
+            )
         self.session = RecordingSession(
             session_id=requested_session_id or uuid.uuid4().hex,
             active=True,
@@ -115,6 +144,7 @@ class RecordingController:
         self._save()
         return self.session
 
+    @_session_locked
     def attach_pcm(
         self,
         pcm: bytes,
@@ -124,34 +154,37 @@ class RecordingController:
         channels: int = 1,
         bits_per_sample: int = 16,
     ) -> RecordingSession:
-        if not pcm:
-            self.session.status = "audio_failed"
-            self.session.message = "Uploaded audio was empty"
-            show_hud("failed", hold_seconds=1.8)
-            self._save()
-            return self.session
         session_id = _clean_session_id(session_id)
-        if session_id and self.session.session_id and session_id != self.session.session_id and self.session.active:
-            self.session.status = "audio_failed"
-            self.session.message = "Uploaded audio session did not match active recording"
-            show_hud("failed", hold_seconds=1.8)
-            self._save()
-            return self.session
-        if session_id and (not self.session.session_id or session_id != self.session.session_id):
-            self.session = RecordingSession(
-                session_id=session_id,
-                active=True,
-                started_at=datetime.now().isoformat(timespec="seconds"),
-                status="recording",
-                message="Recovered recording session from StickS3 audio upload",
-                audio_source="sticks3_pcm",
+        if not self.session.active or self.session.status not in {"recording", "audio_ready"}:
+            return self._rejected(
+                "audio_rejected",
+                "No recording session is waiting for audio",
+                session_id,
             )
-        if bits_per_sample != 16:
-            self.session.status = "audio_failed"
-            self.session.message = "Only 16-bit PCM audio is supported"
-            show_hud("failed", hold_seconds=1.8)
-            self._save()
+        if not session_id or session_id != self.session.session_id:
+            return self._rejected(
+                "audio_rejected",
+                "Uploaded audio session did not match active recording",
+                session_id,
+            )
+        if self.session.status == "audio_ready" and self.session.audio_file:
             return self.session
+        if not pcm:
+            rejected = self._rejected(
+                "audio_failed",
+                "Uploaded audio was empty",
+                session_id,
+            )
+            show_hud("failed", hold_seconds=1.8)
+            return rejected
+        if bits_per_sample != 16:
+            rejected = self._rejected(
+                "audio_failed",
+                "Only 16-bit PCM audio is supported",
+                session_id,
+            )
+            show_hud("failed", hold_seconds=1.8)
+            return rejected
 
         RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
         sid = self.session.session_id or session_id or uuid.uuid4().hex
@@ -164,15 +197,37 @@ class RecordingController:
 
         self.session.audio_file = str(audio_file)
         self.session.audio_source = "sticks3_pcm"
+        self.session.status = "audio_ready"
         self.session.message = "StickS3 audio uploaded"
         show_hud("sending")
         self._save()
         return self.session
 
+    @_session_locked
     def stop(self, request: dict[str, Any] | None = None) -> RecordingSession:
         request = request or {}
+        requested_session_id = _requested_session_id(request)
+        if requested_session_id and requested_session_id != self.session.session_id:
+            return self._rejected(
+                "stop_rejected",
+                "Stop request did not match active recording",
+                requested_session_id,
+            )
+        if not self.session.active:
+            return self.session
+        if self.session.audio_source == "sticks3_pcm" and (
+            self.session.status != "audio_ready" or not self.session.audio_file
+        ):
+            return self._rejected(
+                "stop_rejected",
+                "Audio upload must be confirmed before stopping",
+                requested_session_id,
+            )
         self.session.active = False
         self.session.stopped_at = datetime.now().isoformat(timespec="seconds")
+        self.session.status = "processing"
+        self.session.message = "Processing uploaded audio"
+        self._save()
         explicit_text = str(request.get("text") or request.get("transcript") or "")
         mic_stop = self.audio_recorder.stop()
         if mic_stop is not None:
@@ -306,6 +361,7 @@ class RecordingController:
         self._save_stop_result()
         return self.session
 
+    @_session_locked
     def confirm(self) -> RecordingSession:
         if self.session.status != "pasted" or not self.session.transcript.strip():
             self.session.status = "confirm_failed"
@@ -323,6 +379,7 @@ class RecordingController:
         self._save_stop_result()
         return self.session
 
+    @_session_locked
     def cancel(self) -> RecordingSession:
         if self.session.status != "pasted":
             self.session.status = "cancel_failed"
@@ -342,6 +399,7 @@ class RecordingController:
         self._save_stop_result()
         return self.session
 
+    @_session_locked
     def expire_if_stale(self, max_age_seconds: int = RECORDING_STALE_SECONDS) -> bool:
         if not self.session.active or not self.session.started_at:
             return False
@@ -364,6 +422,10 @@ class RecordingController:
         self._save_stop_result()
         return True
 
+    @_session_locked
+    def current_audio_file(self) -> str:
+        return self.session.audio_file
+
     def _load(self) -> RecordingSession:
         try:
             data = json.loads(self.path.read_text())
@@ -384,8 +446,10 @@ class RecordingController:
         )
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.session.to_jsonable(), indent=2) + "\n")
+        atomic_write_text_if_changed(
+            self.path,
+            json.dumps(self.session.to_jsonable(), indent=2) + "\n",
+        )
 
     def _save_stop_result(self) -> None:
         self._save()
@@ -399,6 +463,17 @@ class RecordingController:
             f"pasted={self.session.pasted} "
             f"message={self.session.message}",
             flush=True,
+        )
+
+    def _rejected(self, status: str, message: str, session_id: str = "") -> RecordingSession:
+        return RecordingSession(
+            session_id=session_id or self.session.session_id,
+            active=False,
+            started_at=self.session.started_at,
+            stopped_at=self.session.stopped_at,
+            status=status,
+            message=message,
+            audio_source=self.session.audio_source,
         )
 
 
