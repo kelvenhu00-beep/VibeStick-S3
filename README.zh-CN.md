@@ -56,7 +56,7 @@ cd VibeStick
 2. 按下面“安装”章节首次构建并烧录 StickS3 固件。烧录需要设备进入下载模式，无法完全自动化。
 3. 烧录完成后运行 `./scripts/install.sh`，再运行 `./scripts/doctor.sh` 验证。
 
-配置文件中的真实 Wi-Fi、API Key 和共享 token 都被 `.gitignore` 排除，不应提交到 GitHub。下面的完整步骤包含 ESP-IDF 安装、烧录端口识别和 macOS 权限说明。
+下面的完整步骤包含 ESP-IDF 安装、烧录端口识别和 macOS 权限说明。
 
 首次烧录以后，新增或修改 Wi-Fi 不再需要编辑源代码或重新烧录：
 
@@ -94,7 +94,7 @@ cd VibeStick
 ./scripts/setup.sh
 ```
 
-2. 填入人类提前准备好的配置：
+2. 填入提前准备好的配置：
 
 ```sh
 open -e firmware/sticks3/include/vibe_stick_secrets.h
