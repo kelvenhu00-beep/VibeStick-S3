@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hmac
 import ipaddress
 import json
 import os
+import socket
 import threading
 import time
 from http import HTTPStatus
@@ -19,7 +21,15 @@ from vibe_stick.audio.adpcm import decode_ima_adpcm
 from vibe_stick.claude.usage import fetch_usage as fetch_claude_usage
 from vibe_stick.claude.usage import to_quota_snapshot as claude_usage_to_quota
 from vibe_stick.codex.quota import QuotaSnapshot, load_quota, save_quota
-from vibe_stick.config.paths import CLAUDE_QUOTA_PATH, QUOTA_PATH, RECORDING_PATH, STATE_PATH, ensure_app_support
+from vibe_stick.config.atomic_file import atomic_write_text_if_changed
+from vibe_stick.config.paths import (
+    CLAUDE_QUOTA_PATH,
+    INSTANCE_LOCK_PATH,
+    QUOTA_PATH,
+    RECORDING_PATH,
+    STATE_PATH,
+    ensure_app_support,
+)
 from vibe_stick.desktop.hud import hide_hud
 from vibe_stick.protocol.state import (
     AlertState,
@@ -37,6 +47,7 @@ from vibe_stick.providers.base import ProviderObservation
 from vibe_stick.providers.claude import observe_claude
 from vibe_stick.providers.codex import observe_codex
 from vibe_stick.server.discovery import BonjourRegistration
+from vibe_stick.server.maintenance import MaintenanceManager
 from vibe_stick.server.usb_transport import USBTransport
 
 MANUAL_STATUS_SECONDS = 60
@@ -50,6 +61,44 @@ PLACEHOLDER_BRIDGE_TOKENS = {
     "changeme",
     "change-me",
 }
+
+
+class RequestBodyError(Exception):
+    pass
+
+
+class VibeStickHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class SingleInstanceLock:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: Any = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise SystemExit("VibeStick Bridge is already running.") from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        self._handle = handle
+
+    def close(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class BridgeStateStore:
@@ -293,13 +342,19 @@ class BridgeStateStore:
             return default_state()
 
     def _save_state_locked(self) -> None:
-        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps(self._state.to_jsonable(), indent=2) + "\n")
+        atomic_write_text_if_changed(
+            STATE_PATH,
+            json.dumps(self._state.to_jsonable(), indent=2) + "\n",
+        )
 
 
 def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
     class VibeStickHandler(BaseHTTPRequestHandler):
         server_version = "VibeStick/0.1"
+
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(_http_read_timeout_seconds())
 
         def do_GET(self) -> None:
             if self.path == "/state":
@@ -316,6 +371,14 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
                 self._send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
 
         def do_POST(self) -> None:
+            try:
+                self._do_POST()
+            except (RequestBodyError, socket.timeout, TimeoutError):
+                self._send_error(HTTPStatus.REQUEST_TIMEOUT, "Request body timed out or disconnected")
+            except (ConnectionError, BrokenPipeError):
+                return
+
+        def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path in _protected_paths() and not self._is_authorized():
                 self._send_error(HTTPStatus.UNAUTHORIZED, "Unauthorized")
@@ -378,7 +441,9 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
                     flush=True,
                 )
                 self._send_json(
-                    response
+                    _compact_audio_ack_response(response)
+                    if _first(query, "compact") == "1"
+                    else response
                 )
             elif parsed.path == "/recording/stop":
                 body = self._read_json_body()
@@ -419,17 +484,25 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
             length = self._content_length()
             if length == 0:
                 return {}
-            raw = self.rfile.read(length)
+            raw = self._read_raw_body(length)
             try:
                 data = json.loads(raw.decode("utf-8"))
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return {}
             return data if isinstance(data, dict) else {}
 
         def _read_raw_body(self, length: int) -> bytes:
             if length <= 0:
                 return b""
-            return self.rfile.read(length)
+            remaining = length
+            chunks: list[bytes] = []
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 64 * 1024))
+                if not chunk:
+                    raise RequestBodyError("Request body ended before Content-Length")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
 
         def _content_length(self) -> int:
             try:
@@ -452,7 +525,10 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1")
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                return
 
         def _send_error(self, status: HTTPStatus, message: str) -> None:
             self._send_json({"error": message}, status=status)
@@ -462,10 +538,17 @@ def make_handler(store: BridgeStateStore) -> type[BaseHTTPRequestHandler]:
 
 def run_server(host: str, port: int) -> None:
     _enforce_bind_security(host)
-    store = BridgeStateStore()
-    server = ThreadingHTTPServer((host, port), make_handler(store))
+    instance = SingleInstanceLock(INSTANCE_LOCK_PATH)
+    instance.acquire()
+    try:
+        store = BridgeStateStore()
+        server = VibeStickHTTPServer((host, port), make_handler(store))
+    except BaseException:
+        instance.close()
+        raise
     bonjour = BonjourRegistration(port=server.server_port, bridge_version=BRIDGE_VERSION)
     usb = USBTransport(store)
+    maintenance = MaintenanceManager(store.recording.current_audio_file)
     if not _bridge_token():
         print(
             "WARNING: VIBE_STICK_BRIDGE_TOKEN is not set; POST endpoints are unauthenticated on loopback only.",
@@ -480,12 +563,15 @@ def run_server(host: str, port: int) -> None:
     else:
         print("VibeStick Bridge Bonjour advertisement is unavailable or disabled.", flush=True)
     usb.start()
+    maintenance.start()
     try:
         server.serve_forever()
     finally:
+        maintenance.close()
         usb.close()
         bonjour.close()
         server.server_close()
+        instance.close()
 
 
 def _protected_paths() -> set[str]:
@@ -539,6 +625,14 @@ def _max_recording_audio_bytes() -> int:
     return max(256_000, min(8_000_000, value))
 
 
+def _http_read_timeout_seconds() -> float:
+    try:
+        value = float(os.environ.get("VIBE_STICK_HTTP_READ_TIMEOUT_SECONDS", "15"))
+    except ValueError:
+        value = 15.0
+    return max(2.0, min(120.0, value))
+
+
 def _compact_recording_response(response: dict[str, Any]) -> dict[str, Any]:
     recording = response.get("recording")
     recording = recording if isinstance(recording, dict) else {}
@@ -549,6 +643,17 @@ def _compact_recording_response(response: dict[str, Any]) -> dict[str, Any]:
             "pasted": bool(recording.get("pasted", False)),
         },
         "state": response.get("state", {}),
+    }
+
+
+def _compact_audio_ack_response(response: dict[str, Any]) -> dict[str, Any]:
+    recording = response.get("recording")
+    recording = recording if isinstance(recording, dict) else {}
+    return {
+        "recording": {
+            "session_id": recording.get("session_id", ""),
+            "status": recording.get("status", ""),
+        }
     }
 
 

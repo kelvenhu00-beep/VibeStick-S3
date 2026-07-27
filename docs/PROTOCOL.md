@@ -40,6 +40,24 @@ The bridge rejects transfers that exceed the configured recording limit or do
 not match the declared byte count. A USB request failure clears the handshake;
 later requests use Wi-Fi until the bridge completes another USB handshake.
 
+## USB-only Wi-Fi profile sync
+
+Wi-Fi credentials are managed only through the framed USB runtime transport.
+They are not exposed by the HTTP server:
+
+- `GET /device/wifi` returns the Mac's current profile list as
+  `{"configured":true,"profiles":[{"ssid":"...","password":"..."}]}`. The
+  StickS3 checks this route every five seconds while USB is ready and stores a
+  changed list in its `vibestick` NVS namespace.
+- `POST /device/wifi/bootstrap` accepts
+  `{"profiles":[{"ssid":"...","password":"..."}]}` only when the Mac has no
+  saved list. This preserves the device's initial compiled or NVS profiles on
+  the first connection and never overwrites an existing Mac list.
+
+The Mac file is `~/Library/Application Support/VibeStick/wifi-networks.json`
+with mode `0600`. The current limit is eight profiles. An empty password means
+an open network.
+
 ## HTTP Fallback
 
 Default bridge URL:
@@ -214,7 +232,9 @@ USB sends raw little-endian signed PCM through the framed transport. HTTP
 accepts the same raw PCM form for compatibility, while current firmware normally
 sends IMA ADPCM with the two encoding headers documented above. The bridge
 validates the encoded length and decoded sample count before attaching PCM to
-the recording session.
+the recording session. A successful response contains the same `session_id`
+and `status: "audio_ready"`. Firmware retries an unconfirmed upload and does
+not call `/recording/stop` until it receives that acknowledgement.
 
 The bridge writes a local WAV file under:
 
@@ -226,11 +246,18 @@ The bridge rejects audio uploads larger than `VIBE_STICK_MAX_RECORDING_AUDIO_BYT
 
 ## POST /recording/stop
 
-Stops the session and runs transcription:
+Stops the session and runs transcription. StickS3 includes the same
+`session_id`; the bridge rejects a mismatched session or a stop received before
+the audio reaches `audio_ready`:
 
 ```json
-{"event":"button_long_stop","source":"sticks3","paste":true}
+{"event":"button_long_stop","source":"sticks3","paste":true,"session_id":"<same-id>"}
 ```
+
+The bridge serializes recording transitions with a session lock. The normal
+order is `recording` → `audio_ready` → `processing` → `pasted` (or a terminal
+failure state). Duplicate uploads for an already confirmed session are
+idempotent; cross-session requests do not replace the active session.
 
 When transcription succeeds, the bridge pastes the text into the focused macOS app, then the device waits for an explicit action:
 

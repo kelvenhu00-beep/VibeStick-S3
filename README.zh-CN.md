@@ -31,10 +31,12 @@ VibeStick 面向 M5Stack StickS3，不是 M5Stack 官方项目。Codex、Claude 
   文本框，不执行内容。
 - **不在 `TEXT READY` 状态时：** 单击正面蓝键清除当前提醒；双击刷新用量。
 - **单击侧面按键：** 在已启用的 Codex 和 Claude 界面之间切换。
+- **复位/电源键：** 单击复位或开机，双击关机，长按进入下载模式。
 - **连接信息：** `USB` 表示数据线运行通道已连接，`WIFI` 表示正在使用
   HTTP 回退，`OFF` 表示两个 Bridge 通道都不可用。第二行显示当前 Wi-Fi
   名称；尝试已保存网络时显示 `TRY <名称>`。
 - **用量：** 当前设备界面只显示 `7D` 剩余用量，已经删除 5 小时卡片。
+- **省电：** 60 秒没有按键操作后屏幕会自动降低亮度，下一次按键立即恢复。
 
 ## 最快部署（macOS）
 
@@ -55,6 +57,17 @@ cd VibeStick
 3. 烧录完成后运行 `./scripts/install.sh`，再运行 `./scripts/doctor.sh` 验证。
 
 配置文件中的真实 Wi-Fi、API Key 和共享 token 都被 `.gitignore` 排除，不应提交到 GitHub。下面的完整步骤包含 ESP-IDF 安装、烧录端口识别和 macOS 权限说明。
+
+首次烧录以后，新增或修改 Wi-Fi 不再需要编辑源代码或重新烧录：
+
+```sh
+./scripts/wifi.sh add "Wi-Fi 名称"
+./scripts/wifi.sh list
+./scripts/wifi.sh remove "旧 Wi-Fi 名称"
+```
+
+`add` 会以隐藏方式询问密码。执行后保持 StickS3 通过 USB 连接至少 5 秒，
+Bridge 会仅通过 USB 把最多 8 个网络同步到设备，并由设备保存在 NVS 中。
 
 ## 开始前的准备
 
@@ -185,11 +198,11 @@ ESP-IDF 没有加载到当前 shell，或者还没有安装。先 source ESP-IDF
 
 ### StickS3 连不上 Wi-Fi
 
-请使用 2.4GHz Wi-Fi。StickS3 / ESP32-S3 不支持 5GHz Wi-Fi。需要移动办公
-时，在 `firmware/sticks3/include/vibe_stick_secrets.h` 中定义
-`VIBE_STICK_WIFI_NETWORKS`。设备会显示已经连接的 SSID，或在轮换已保存网络
-时显示 `TRY <名称>`。使用 Wi-Fi 回退时，Mac 和 StickS3 必须处于同一网络；
-启用了客户端隔离的网络无法连接 Bridge。
+请使用 2.4GHz Wi-Fi。StickS3 / ESP32-S3 不支持 5GHz Wi-Fi。首次烧录后用
+`./scripts/wifi.sh add "Wi-Fi 名称"` 添加网络，保持 USB 连接至少 5 秒即可
+同步，无需重新烧录。设备会显示已经连接的 SSID，或在轮换已保存网络时显示
+`TRY <名称>`。使用 Wi-Fi 回退时，Mac 和 StickS3 必须处于同一网络；启用了
+客户端隔离的网络无法连接 Bridge。
 
 ### 录音能转写但没有粘贴
 
@@ -325,9 +338,13 @@ idf.py build
 - Codex quota 来自本地 Codex session JSONL 里的 `rate_limits`，不是官方 quota API。
 - Claude usage 来自未公开的 Claude Code OAuth endpoint，默认关闭。
 - 设备单段录音上限为 55 秒。
+- 只有 Bridge 对同一个录音会话返回 `audio_ready` 后，设备才会进入停止和识别
+  阶段；没有确认的上传会重试，不会直接调用 stop。
 - USB 直接发送采集到的 16kHz / 16-bit / 单声道 PCM；Wi-Fi 使用 IMA ADPCM
   压缩同一批采样，Bridge 解码回 PCM 后再写入 WAV 并进行 ASR。
 - ASR 可靠性取决于麦克风采集、网络质量、provider 可达性和模型配置。
+- Bridge 状态和用量文件只在内容变化时原子写入；Codex 日志使用增量内存缓存，
+  本地日志会轮换，旧录音会按保留策略自动清理。
 
 ## 贡献与安全
 

@@ -4,10 +4,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vibe_stick.providers._jsonl import session_files, tail_json_events
+from vibe_stick.providers._jsonl import (
+    cached_tail_json_events,
+    clear_jsonl_caches,
+    session_files,
+    tail_json_events,
+)
 
 
 class JsonlHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_jsonl_caches()
+
     def test_tail_json_events_ignores_partial_and_invalid_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.jsonl"
@@ -43,6 +51,19 @@ class JsonlHelperTests(unittest.TestCase):
             files = session_files(root, max_files=1)
 
         self.assertEqual(files, [newer])
+
+    def test_cached_tail_reads_appended_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text(json.dumps({"type": "first"}) + "\n")
+
+            first = list(cached_tail_json_events(path, tail_bytes=2048))
+            with path.open("a") as handle:
+                handle.write(json.dumps({"type": "second"}) + "\n")
+            second = list(cached_tail_json_events(path, tail_bytes=2048))
+
+        self.assertEqual([event["type"] for event in first], ["first"])
+        self.assertEqual([event["type"] for event in second], ["first", "second"])
 
 
 if __name__ == "__main__":

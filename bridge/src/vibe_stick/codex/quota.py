@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from vibe_stick.config.atomic_file import atomic_write_text_if_changed
+
 
 @dataclass
 class QuotaSnapshot:
@@ -31,8 +33,10 @@ def load_quota(path: Path) -> QuotaSnapshot:
 
 
 def save_quota(path: Path, snapshot: QuotaSnapshot) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot.to_jsonable(), indent=2) + "\n")
+    atomic_write_text_if_changed(
+        path,
+        json.dumps(snapshot.to_jsonable(), indent=2) + "\n",
+    )
 
 
 def _percent_or_none(value: object) -> int | None:

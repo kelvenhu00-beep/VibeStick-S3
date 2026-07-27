@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import unittest
+from unittest.mock import patch
 
 from vibe_stick.server.usb_transport import PROTOCOL_PREFIX, USBProtocol
 
@@ -92,6 +93,48 @@ class USBProtocolTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertIn("Audio length mismatch", payload["error"])
+
+    @patch(
+        "vibe_stick.server.usb_transport.usb_wifi_payload",
+        return_value={
+            "configured": True,
+            "profiles": [{"ssid": "Office", "password": "password"}],
+        },
+    )
+    def test_wifi_profiles_are_available_only_through_usb_dispatch(self, _payload) -> None:
+        protocol = USBProtocol(_Store())
+        line = (
+            f"{PROTOCOL_PREFIX} REQUEST 12 GET "
+            f"{_b64(b'/device/wifi')} {_b64(b'')}"
+        )
+
+        request_id, status, payload = _decode_response(protocol.handle_line(line)[0])
+
+        self.assertEqual((request_id, status), (12, 200))
+        self.assertTrue(payload["configured"])
+        self.assertEqual(payload["profiles"][0]["ssid"], "Office")
+
+    @patch(
+        "vibe_stick.server.usb_transport.bootstrap_wifi_profiles",
+        return_value=True,
+    )
+    def test_device_can_bootstrap_existing_wifi_profiles_over_usb(self, bootstrap) -> None:
+        protocol = USBProtocol(_Store())
+        body = json.dumps(
+            {"profiles": [{"ssid": "Existing", "password": "password"}]}
+        ).encode()
+        line = (
+            f"{PROTOCOL_PREFIX} REQUEST 13 POST "
+            f"{_b64(b'/device/wifi/bootstrap')} {_b64(body)}"
+        )
+
+        request_id, status, payload = _decode_response(protocol.handle_line(line)[0])
+
+        self.assertEqual((request_id, status), (13, 200))
+        self.assertTrue(payload["created"])
+        bootstrap.assert_called_once_with(
+            {"profiles": [{"ssid": "Existing", "password": "password"}]}
+        )
 
 
 if __name__ == "__main__":

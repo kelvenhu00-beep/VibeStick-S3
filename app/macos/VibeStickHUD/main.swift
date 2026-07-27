@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import QuartzCore
 
@@ -170,6 +171,8 @@ private final class HudController {
     private let window: NSPanel
     private let contentView = HudContentView(frame: NSRect(x: 0, y: 0, width: 252, height: 72))
     private var currentSignature = ""
+    private var directorySource: DispatchSourceFileSystemObject?
+    private var expiryWorkItem: DispatchWorkItem?
 
     init() {
         let support = FileManager.default.homeDirectoryForCurrentUser
@@ -192,19 +195,51 @@ private final class HudController {
         window.contentView = contentView
         window.alphaValue = 0
 
-        Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+        watchDirectory(support)
+        poll()
+    }
+
+    deinit {
+        expiryWorkItem?.cancel()
+        directorySource?.cancel()
+    }
+
+    private func watchDirectory(_ directory: URL) {
+        let descriptor = open(directory.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .rename, .delete],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
             self?.poll()
         }
+        source.setCancelHandler {
+            close(descriptor)
+        }
+        directorySource = source
+        source.resume()
     }
 
     private func poll() {
+        expiryWorkItem?.cancel()
+        expiryWorkItem = nil
         guard let state = readState() else {
             hide()
             return
         }
-        if let expires = state.expires_at_epoch, Date().timeIntervalSince1970 >= expires {
-            hide()
-            return
+        if let expires = state.expires_at_epoch {
+            let delay = expires - Date().timeIntervalSince1970
+            if delay <= 0 {
+                hide()
+                return
+            }
+            let work = DispatchWorkItem { [weak self] in
+                self?.poll()
+            }
+            expiryWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
         guard state.active else {
             hide()
