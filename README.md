@@ -108,7 +108,7 @@ cd VibeStick
 ./scripts/setup.sh
 ```
 
-2. Fill the local config values the human prepared:
+2. Fill the local config values:
 
 ```sh
 open -e firmware/sticks3/include/vibe_stick_secrets.h
